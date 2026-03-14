@@ -2,6 +2,7 @@ import { it, expect, describe } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/git";
+import { handleFetchV2Streaming } from "@/git/operations/uploadStream.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 function buildFetchBody({
@@ -643,30 +644,13 @@ describe("git fetch streaming (default)", () => {
       done: false,
     });
 
-    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
     const abortController = new AbortController();
 
     // Abort immediately
     abortController.abort();
 
-    try {
-      const res = await SELF.fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-git-upload-pack-request",
-          "Git-Protocol": "version=2",
-          "X-Git-Streaming": "true",
-        },
-        body,
-        signal: abortController.signal,
-      } as any);
-
-      // If the request wasn't aborted client-side, check server response
-      expect(res.status).toBe(499); // Server detected client abort
-    } catch (e: any) {
-      // Client-side abort is expected
-      expect(e.name).toBe("AbortError");
-    }
+    const res = await handleFetchV2Streaming(env as Env, repoId, body, abortController.signal);
+    expect(res.status).toBe(499);
   });
 
   it("verifies streaming response includes progress messages", async () => {

@@ -48,10 +48,13 @@ it("receive-pack: one-deep queue, third push blocked with 503", async () => {
   // Build objects for three independent pushes
   const { oid: treeOid, payload: treePayload } = await makeTree();
 
-  const c1 = await makeCommit(treeOid, "A\n");
+  const firstPushCommits = await Promise.all(
+    Array.from({ length: 128 }, (_, i) => makeCommit(treeOid, `A-${i}\n`))
+  );
+  const c1 = firstPushCommits[firstPushCommits.length - 1];
   const p1 = await buildPack([
     { type: "tree", payload: treePayload },
-    { type: "commit", payload: c1.payload },
+    ...firstPushCommits.map((commit) => ({ type: "commit" as const, payload: commit.payload })),
   ]);
   const body1 = concatChunks([
     pktLine(`${zero40()} ${c1.oid} refs/heads/a1\0 report-status ofs-delta agent=test\n`),
@@ -94,8 +97,14 @@ it("receive-pack: one-deep queue, third push blocked with 503", async () => {
   const pre3 = await callStubWithRetry<UnpackProgress>(getStub as any, (s: any) =>
     s.getUnpackProgress()
   );
-  expect(pre3.unpacking).toBe(true);
-  expect(Number(pre3.queuedCount || 0)).toBe(1);
+  let queued = pre3.unpacking === true && Number(pre3.queuedCount || 0) === 1;
+  let current = pre3;
+  for (let i = 0; i < 20 && !queued; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    current = await callStubWithRetry<UnpackProgress>(getStub as any, (s: any) => s.getUnpackProgress());
+    queued = current.unpacking === true && Number(current.queuedCount || 0) === 1;
+  }
+  expect(queued).toBe(true);
 
   // Third push should be blocked by preflight (or DO guard) with 503
   const c3 = await makeCommit(treeOid, "C\n");
