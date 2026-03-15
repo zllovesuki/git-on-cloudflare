@@ -29,14 +29,6 @@ router.get("/", async (request, env: Env) => {
   return renderPage(env, request, "git-on-cloudflare", body);
 });
 
-// Serve shared static assets (e.g., /base.css)
-router.get(`/base.css`, (request, env: Env) => {
-  if (env.ASSETS) {
-    return env.ASSETS.fetch(request);
-  }
-  return new Response("Not found\n", { status: 404 });
-});
-
 // Register UI routes AFTER static/auth so that /:owner doesn't shadow them
 registerUiRoutes(router);
 

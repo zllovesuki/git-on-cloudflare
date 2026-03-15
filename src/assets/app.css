@@ -143,22 +143,6 @@
   }
 }
 
-@utility secondary {
-  &.btn {
-    @apply text-zinc-700 bg-white bg-none border-zinc-300 shadow-none dark:text-zinc-200 dark:bg-zinc-800 dark:border-zinc-600;
-  }
-
-  &.btn:hover {
-    @apply bg-zinc-50 dark:bg-zinc-700 brightness-100;
-  }
-}
-
-@utility sm {
-  &.btn {
-    @apply px-3 py-1.5 text-sm;
-  }
-}
-
 @utility alert {
   /* Alert components */
   @apply p-4 rounded-xl mb-4;
@@ -168,18 +152,6 @@
   }
 
   &.error {
-    @apply bg-red-50 text-red-800 dark:bg-red-900/20 dark:text-red-200;
-  }
-}
-
-@utility warn {
-  &.alert {
-    @apply bg-yellow-50 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200;
-  }
-}
-
-@utility error {
-  &.alert {
     @apply bg-red-50 text-red-800 dark:bg-red-900/20 dark:text-red-200;
   }
 }
@@ -211,22 +183,6 @@
   }
 
   & .nav {
-    @apply flex gap-3;
-  }
-}
-
-@utility perpage {
-  .pager & {
-    @apply flex gap-3 text-sm;
-  }
-
-  .pager & a {
-    @apply px-2 py-1 rounded-sm hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors;
-  }
-}
-
-@utility nav {
-  .pager & {
     @apply flex gap-3;
   }
 }
@@ -425,6 +381,20 @@
     @apply text-sm font-mono;
   }
 
+  #blob-pre {
+    background-color: transparent;
+    padding: 0 !important;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+
+  #blob-code,
+  #blob-code.hljs {
+    display: block;
+    padding: 0 !important;
+    margin: 0;
+  }
+
   /* Override highlight.js theme backgrounds so our zinc containers show through */
   pre code.hljs,
   .blob-container code.hljs,
@@ -439,6 +409,93 @@
   /* Inline code inside highlighted blocks should not get the inline code background */
   pre code {
     @apply bg-transparent p-0;
+  }
+
+  /* Line-numbered code table (blob view) */
+  pre.has-line-numbers {
+    padding: 0 !important;
+    overflow-x: auto;
+  }
+
+  .code-table {
+    border-collapse: collapse;
+    width: 100%;
+    background: transparent;
+  }
+
+  .code-table tr {
+    border: none;
+    background: transparent;
+  }
+
+  .code-table tr:hover {
+    background: transparent;
+  }
+
+  .code-table td {
+    padding: 0;
+    border: none;
+  }
+
+  .code-table .line-num {
+    width: 1%;
+    min-width: 3.5rem;
+    white-space: nowrap;
+    padding: 0 1rem 0 0.5rem;
+    text-align: right;
+    vertical-align: top;
+    user-select: none;
+    -webkit-user-select: none;
+    box-shadow: inset -1px 0 0 var(--color-zinc-200);
+  }
+
+  .code-table .line-num a {
+    display: block;
+    color: var(--color-zinc-400);
+    text-decoration: none !important;
+    font-size: 0.75rem;
+    line-height: 1.375rem;
+    cursor: pointer;
+  }
+
+  html.dark .code-table .line-num a {
+    color: var(--color-zinc-600);
+  }
+
+  .code-table .line-num a:hover {
+    color: var(--color-indigo-500);
+  }
+
+  .code-table .line-num {
+    border-right: 1px solid var(--color-zinc-200);
+  }
+
+  html.dark .code-table .line-num {
+    border-right-color: var(--color-zinc-700);
+    box-shadow: inset -1px 0 0 var(--color-zinc-700);
+  }
+
+  .code-line:hover {
+    background: rgba(99, 102, 241, 0.04);
+  }
+
+  html.dark .code-line:hover {
+    background: rgba(99, 102, 241, 0.08);
+  }
+
+  .code-table .line-code {
+    white-space: pre;
+    padding: 0 0.75rem 0 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.375rem;
+  }
+
+  .code-line.line-highlight {
+    background: rgba(99, 102, 241, 0.08);
+  }
+
+  html.dark .code-line.line-highlight {
+    background: rgba(99, 102, 241, 0.15);
   }
 
   /* Refs popover styles */

@@ -573,7 +573,6 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         fileName,
         viewRawHref,
         rawHref,
-        contentClass: !isBinary ? "markdown-content" : undefined,
       };
 
       if (isBinary) {
@@ -598,6 +597,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           fileName.toLowerCase().endsWith(".md") || fileName.toLowerCase().endsWith(".markdown");
         if (isMd) {
           const baseDir = (path || "").split("/").filter(Boolean).slice(0, -1).join("/");
+          templateData.contentClass = "markdown-content";
           templateData.isMarkdown = true;
           templateData.markdownRaw = text;
           templateData.lineCount = lineCount;

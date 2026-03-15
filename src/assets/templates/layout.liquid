@@ -185,11 +185,83 @@
               });
             } catch {}
           }
+          function addLineNumbers() {
+            try {
+              var code = document.getElementById('blob-code');
+              if (!code) return;
+              var pre = document.getElementById('blob-pre');
+              if (!pre) return;
+
+              var html = code.innerHTML;
+              var rawLines = html.split('\n');
+              // Remove trailing empty line (common artifact)
+              if (rawLines.length > 1 && rawLines[rawLines.length - 1] === '') rawLines.pop();
+
+              var openTags = [];
+              var tagRe = /<\/?span[^>]*>/gi;
+              var rows = '';
+
+              for (var i = 0; i < rawLines.length; i++) {
+                var num = i + 1;
+                var line = rawLines[i];
+
+                // Reopen tags left open from the previous line
+                var prefix = openTags.join('');
+
+                // Track open/close tags in this line
+                tagRe.lastIndex = 0;
+                var m;
+                while ((m = tagRe.exec(line)) !== null) {
+                  if (m[0].charAt(1) === '/') openTags.pop();
+                  else openTags.push(m[0]);
+                }
+
+                // Close still-open tags at end of this line
+                var suffix = '';
+                for (var j = openTags.length - 1; j >= 0; j--) suffix += '</span>';
+
+                var content = prefix + line + suffix;
+                if (!content) content = '\n'; // preserve blank lines
+
+                rows +=
+                  '<tr id="L' + num + '" class="code-line">' +
+                  '<td class="line-num"><a href="#L' + num + '">' + num + '</a></td>' +
+                  '<td class="line-code">' + content + '</td>' +
+                  '</tr>';
+              }
+
+              var table = document.createElement('table');
+              table.className = 'code-table';
+              table.innerHTML = rows;
+              code.innerHTML = '';
+              code.appendChild(table);
+              pre.classList.add('has-line-numbers');
+
+              // Highlight line referenced in URL hash
+              function highlightHash() {
+                var old = pre.querySelector('.line-highlight');
+                if (old) old.classList.remove('line-highlight');
+                var hash = location.hash;
+                if (hash && /^#L\d+$/.test(hash)) {
+                  var row = document.getElementById(hash.slice(1));
+                  if (row) {
+                    row.classList.add('line-highlight');
+                    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                  }
+                }
+              }
+              highlightHash();
+              window.addEventListener('hashchange', highlightHash);
+            } catch (e) {
+              console.warn('addLineNumbers failed', e);
+            }
+          }
           function run() {
             renderMarkdownBlocks();
             try {
               hljs.highlightAll();
             } catch {}
+            addLineNumbers();
           }
           // Wait until all resources (including CSS) are loaded to avoid FOUC/layout thrash
           if (document.readyState === 'complete') run();
