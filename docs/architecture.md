@@ -21,7 +21,13 @@ The codebase is organized into focused modules with `index.ts` export files:
 - **`/web`** - Web UI utilities
   - `format.ts` - Content formatting helpers
   - `render.ts` - Page rendering
-  - `templates.ts` - Liquid template engine
+  - `templates.ts` - React view compatibility shim
+- **`/ui`** - React SSR UI layer
+  - `server/` - Document shell, manifest resolution, render registry
+  - `pages/` - Route-level React page components
+  - `components/` - Shared server-rendered UI building blocks
+  - `islands/` - Small client-side interactive modules
+  - `client/entry.tsx` - Browser entry for CSS and islands
 - **`/common`** - Shared utilities
   - `compression.ts`, `hex.ts`, `logger.ts`, `response.ts`, `stub.ts`, `progress.ts`
 - **`/registry`** - Owner/repo registry management
@@ -86,14 +92,13 @@ The codebase is organized into focused modules with `index.ts` export files:
   - Hydration stores coverage in SQLite and emits thick packs (no deltas) while persisting pack membership immediately for robust coverage.
 - Registry note: owner→repo registry still uses Workers KV (`OWNER_REGISTRY`) for the web UI owner listing. Pack discovery and membership no longer use KV.
 
-### Static assets and templates (env.ASSETS + Liquid)
+### Static assets and UI rendering (env.ASSETS + React SSR)
 
-- Templates and assets are served via Wrangler's assets binding `env.ASSETS` (see `wrangler.jsonc` → `assets`).
-- LiquidJS engine is configured in `src/web/templates.ts` to load templates from `src/assets/templates/` and partials from `src/assets/templates/partials/` using a custom FS adapter that fetches through `env.ASSETS`.
-- Important settings:
-  - `outputEscape: "escape"` to HTML-escape `{{ var }}` by default
-  - `cache: true` to enable Liquid's LRU parse cache
-  - Streaming render uses Node's `Readable` converted to Web `ReadableStream` via `Readable.toWeb()`
+- React page components are rendered on the Worker through `renderToReadableStream()` in `src/ui/server/render.tsx`.
+- `src/web/templates.ts` now delegates existing `renderView()` calls into the React view registry so route/backend logic stays unchanged.
+- The browser entry at `src/ui/client/entry.tsx` imports `src/styles/app.css` and mounts focused islands for theme switching, ref picking, merge expansion, auth management, blob copy actions, and repo admin controls.
+- Production assets are built by Vite and served through the `ASSETS` binding using the generated manifest (`dist/client/manifest.json`).
+- Development runs through the Cloudflare Vite plugin so Worker code, TSX, and CSS all participate in the same hot-reload pipeline.
 - Assets config uses `html_handling: "none"` so the Worker controls routes like `/auth` without the assets layer intercepting them.
 
 ## Background processing and alarms

@@ -1,4 +1,4 @@
 node_modules/
 .wrangler/
-.dev.vars
-src/assets/dist/
+.dev.vars*
+dist/

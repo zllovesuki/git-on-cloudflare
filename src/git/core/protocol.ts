@@ -1,4 +1,5 @@
 import { pktLine, flushPkt, concatChunks, decodePktLines } from "./pktline.ts";
+import { asBodyInit } from "@/common/webtypes.ts";
 import { getRepoStub } from "@/common/stub.ts";
 
 /**
@@ -26,7 +27,7 @@ export async function capabilityAdvertisement(
     chunks.push(pktLine("ofs-delta\n"));
     chunks.push(pktLine(`object-format=sha1\n`));
     chunks.push(flushPkt());
-    return new Response(concatChunks(chunks), {
+    return new Response(asBodyInit(concatChunks(chunks)), {
       status: 200,
       headers: {
         "Content-Type": "application/x-git-upload-pack-advertisement",
@@ -70,7 +71,7 @@ export async function capabilityAdvertisement(
     lines.push(pktLine(`0000000000000000000000000000000000000000 capabilities^{}\0${caps}\n`));
   }
   lines.push(flushPkt());
-  return new Response(concatChunks(lines), {
+  return new Response(asBodyInit(concatChunks(lines)), {
     status: 200,
     headers: {
       "Content-Type": "application/x-git-receive-pack-advertisement",

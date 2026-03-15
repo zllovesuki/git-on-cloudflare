@@ -101,7 +101,9 @@ it("receive-pack: one-deep queue, third push blocked with 503", async () => {
   let current = pre3;
   for (let i = 0; i < 20 && !queued; i++) {
     await new Promise((resolve) => setTimeout(resolve, 5));
-    current = await callStubWithRetry<UnpackProgress>(getStub as any, (s: any) => s.getUnpackProgress());
+    current = await callStubWithRetry<UnpackProgress>(getStub as any, (s: any) =>
+      s.getUnpackProgress()
+    );
     queued = current.unpacking === true && Number(current.queuedCount || 0) === 1;
   }
   expect(queued).toBe(true);

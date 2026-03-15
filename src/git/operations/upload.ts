@@ -4,7 +4,13 @@ import type { CacheContext } from "@/cache/index.ts";
 import type { RepoDurableObject } from "@/index.ts";
 
 import { pktLine, flushPkt, delimPkt, concatChunks } from "@/git/core/index.ts";
-import { getRepoStub, createLogger, createInflateStream } from "@/common/index.ts";
+import {
+  getRepoStub,
+  createLogger,
+  createInflateStream,
+  createBlobFromBytes,
+  asBodyInit,
+} from "@/common/index.ts";
 import { assemblePackFromMultiplePacks, assemblePackFromR2 } from "@/git/pack/assembler.ts";
 import { readLooseObjectRaw } from "./read.ts";
 import { getPackCandidates } from "./packDiscovery.ts";
@@ -123,7 +129,7 @@ export async function handleFetchV2(
   if (wants.length === 0) {
     // No wants: respond with ack-only
     const chunks = [pktLine("acknowledgments\n"), pktLine("NAK\n"), flushPkt()];
-    return new Response(concatChunks(chunks), {
+    return new Response(asBodyInit(concatChunks(chunks)), {
       status: 200,
       headers: {
         "Content-Type": "application/x-git-upload-pack-result",
@@ -153,7 +159,7 @@ export async function handleFetchV2(
       chunks.push(pktLine("NAK\n"));
     }
     chunks.push(flushPkt());
-    return new Response(concatChunks(chunks), {
+    return new Response(asBodyInit(concatChunks(chunks)), {
       status: 200,
       headers: {
         "Content-Type": "application/x-git-upload-pack-result",
@@ -465,7 +471,7 @@ export async function handleFetchV2(
         const z = dataMap.get(oid) || null;
         if (!z) continue; // skip; we'll try pack path later
         try {
-          const stream = new Blob([z]).stream().pipeThrough(createInflateStream());
+          const stream = createBlobFromBytes(z).stream().pipeThrough(createInflateStream());
           const raw = new Uint8Array(await new Response(stream).arrayBuffer());
           // header: <type> <len>\0
           let p = 0;
@@ -523,7 +529,7 @@ export async function handleFetchV2(
       for (const [oid, z] of more) {
         if (!z) continue;
         try {
-          const stream = new Blob([z]).stream().pipeThrough(createInflateStream());
+          const stream = createBlobFromBytes(z).stream().pipeThrough(createInflateStream());
           const raw = new Uint8Array(await new Response(stream).arrayBuffer());
           let p = 0;
           while (p < raw.length && raw[p] !== 0x20) p++;
@@ -604,7 +610,7 @@ export function respondWithPackfile(
     chunks.push(pktLine(banded));
   }
   chunks.push(flushPkt());
-  return new Response(concatChunks(chunks), {
+  return new Response(asBodyInit(concatChunks(chunks)), {
     status: 200,
     headers: {
       "Content-Type": "application/x-git-upload-pack-result",

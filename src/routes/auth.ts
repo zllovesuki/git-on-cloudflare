@@ -1,26 +1,24 @@
 import { AutoRouter } from "itty-router";
-import { renderView, renderPage } from "@/web";
+import { renderUiView } from "@/ui/server/render";
 import { getAuthStub, getBearerToken, unauthorizedBearer, tooManyAttempts, json } from "@/common";
 
 export function registerAuthRoutes(router: ReturnType<typeof AutoRouter>) {
   // Auth UI page
-  router.get(`/auth`, async (request, env: Env) => {
+  router.get(`/auth`, async (_request, env: Env) => {
     try {
-      const html = await renderView(env, "auth", {});
+      const html = await renderUiView(env, "auth", {});
       if (!html) {
-        const body = `<h1>Auth</h1><p>Auth page asset missing.</p>`;
-        return renderPage(env, request, "Auth · git-on-cloudflare", body);
+        return new Response("Failed to render page\n", { status: 500 });
       }
       return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid",
+          "X-Page-Renderer": "react-ssr",
         },
       });
     } catch {
-      const body = `<h1>Auth</h1><p>Auth page asset missing.</p>`;
-      return renderPage(env, request, "Auth · git-on-cloudflare", body);
+      return new Response("Failed to render page\n", { status: 500 });
     }
   });
 

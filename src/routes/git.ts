@@ -13,7 +13,7 @@ import {
   parseTagTarget,
 } from "@/git";
 import { handleFetchV2Streaming } from "@/git/operations/uploadStream.ts";
-import { getRepoStub } from "@/common";
+import { asBodyInit, getRepoStub } from "@/common";
 import { repoKey } from "@/keys";
 import { verifyAuth } from "@/auth";
 import { addRepoToOwner, removeRepoFromOwner } from "@/registry";
@@ -136,7 +136,7 @@ async function handleUploadPackPOST(
       chunks.push(pktLine(line + "\n"));
     }
     chunks.push(flushPkt());
-    return new Response(concatChunks(chunks), {
+    return new Response(asBodyInit(concatChunks(chunks)), {
       status: 200,
       headers: {
         "Content-Type": "application/x-git-upload-pack-result",

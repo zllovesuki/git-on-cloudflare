@@ -19,8 +19,6 @@ import {
   bytesToText,
   formatWhen,
   getFileIconClass,
-  renderView,
-  getMarkdownHighlightLangs,
   getHighlightLangsForBlobSmart,
   isValidOwnerRepo,
   isValidRef,
@@ -29,9 +27,10 @@ import {
   getContentTypeFromName,
   HttpError,
 } from "@/web";
+import { renderUiView } from "@/ui/server/render";
+import { handleError } from "@/ui/server/error";
 import { listReposForOwner } from "@/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON, cacheOrLoadJSONWithTTL } from "@/cache";
-import { handleError } from "@/web/templates";
 import { getUnpackProgress, getRepoStub } from "@/common";
 import { verifyAuth } from "@/auth";
 
@@ -165,19 +164,19 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       return badRequest(env, "Invalid owner", "Owner contains invalid characters or length");
     }
     const repos = await listReposForOwner(env, owner);
-    const html = await renderView(env, "owner", {
+    const html = await renderUiView(env, "owner", {
       title: `${owner} · Repositories`,
       owner,
       repos,
     });
     if (!html) {
-      return new Response("Failed to render template", { status: 500 });
+      return new Response("Failed to render view", { status: 500 });
     }
     return new Response(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, max-age=60",
-        "X-Page-Renderer": "liquid",
+        "X-Page-Renderer": "react-ssr",
       },
     });
   });
@@ -275,7 +274,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     // Check unpacking progress (shared helper)
     const progress = await getUnpackProgress(env, repoId);
 
-    const html = await renderView(env, "overview", {
+    const html = await renderUiView(env, "overview", {
       title: `${owner}/${repo}`,
       owner,
       repo,
@@ -284,20 +283,16 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       branches: branchesData,
       tags: tagsData,
       readmeMd,
-      // Load markdown + syntax highlighting assets only if README is present
-      needsMarkdown: Boolean(readmeMd),
-      needsHighlight: Boolean(readmeMd),
-      highlightLangs: readmeMd ? getMarkdownHighlightLangs() : [],
       progress,
     });
     if (!html) {
-      return new Response("Failed to render template", { status: 500 });
+      return new Response("Failed to render view", { status: 500 });
     }
     return new Response(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "liquid",
+        "X-Page-Renderer": "react-ssr",
       },
     });
   });
@@ -353,7 +348,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     // Handle missing tree/blob result gracefully (e.g., non-existent repo or path)
     if (!result) {
       try {
-        const errHtml = await renderView(env, "error", {
+        const errHtml = await renderUiView(env, "error", {
           title: `${owner}/${repo} · Tree`,
           message: "Not found",
           owner,
@@ -435,7 +430,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
             ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
             : null;
         const progress = await getUnpackProgress(env, repoId);
-        const html = await renderView(env, "tree", {
+        const html = await renderUiView(env, "tree", {
           title: `${path || "root"} · ${owner}/${repo}`,
           owner,
           repo,
@@ -446,13 +441,13 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           entries,
         });
         if (!html) {
-          return new Response("Failed to render template", { status: 500 });
+          return new Response("Failed to render view", { status: 500 });
         }
         return new Response(html, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid",
+            "X-Page-Renderer": "react-ssr",
           },
         });
       } else {
@@ -463,7 +458,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         // Infer language and load only what we need (use smart inference with content)
         const langs = getHighlightLangsForBlobSmart(title, text);
         const codeLang = langs[0] || null;
-        const html = await renderView(env, "blob", {
+        const html = await renderUiView(env, "blob", {
           title: `${title} · ${owner}/${repo}`,
           owner,
           repo,
@@ -471,22 +466,18 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           fileName: title,
           viewRawHref: `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(title)}`,
           rawHref: raw,
-          // Structured fields instead of HTML
           codeText: text,
           codeLang,
           lineCount,
-          contentClass: "markdown-content",
-          needsHighlight: true,
-          highlightLangs: langs,
         });
         if (!html) {
-          return new Response("Failed to render template", { status: 500 });
+          return new Response("Failed to render view", { status: 500 });
         }
         return new Response(html, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid",
+            "X-Page-Renderer": "react-ssr",
           },
         });
       }
@@ -537,7 +528,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         const sizeStr = formatSize(result.size || 0);
         const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(fileName)}`;
         const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&download=1&name=${encodeURIComponent(fileName)}`;
-        const html = await renderView(env, "blob", {
+        const html = await renderUiView(env, "blob", {
           title: `${fileName} · ${owner}/${repo}`,
           owner,
           repo,
@@ -549,13 +540,13 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           rawHref,
         });
         if (!html) {
-          return new Response("Failed to render template", { status: 500 });
+          return new Response("Failed to render view", { status: 500 });
         }
         return new Response(html, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid",
+            "X-Page-Renderer": "react-ssr",
           },
         });
       }
@@ -565,7 +556,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       const size = result.content.byteLength;
       const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(fileName)}`;
       const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&download=1&name=${encodeURIComponent(fileName)}`;
-      const templateData: Record<string, any> = {
+      const templateData: Record<string, unknown> = {
         title: `${fileName} · ${owner}/${repo}`,
         owner,
         repo,
@@ -597,7 +588,6 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           fileName.toLowerCase().endsWith(".md") || fileName.toLowerCase().endsWith(".markdown");
         if (isMd) {
           const baseDir = (path || "").split("/").filter(Boolean).slice(0, -1).join("/");
-          templateData.contentClass = "markdown-content";
           templateData.isMarkdown = true;
           templateData.markdownRaw = text;
           templateData.lineCount = lineCount;
@@ -605,31 +595,27 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           templateData.mdRepo = repo;
           templateData.mdRef = ref;
           templateData.mdBase = baseDir;
-          // Markdown rendering will handle highlighting after sanitize
-          templateData.needsMarkdown = true;
         } else {
           const langs = getHighlightLangsForBlobSmart(fileName, text);
           const codeLang = langs[0] || null;
           templateData.codeText = text;
           templateData.codeLang = codeLang;
           templateData.lineCount = lineCount;
-          templateData.needsHighlight = true;
-          templateData.highlightLangs = langs;
           if (!codeLang) {
             templateData.sizeStr = formatSize(size);
           }
         }
       }
 
-      const html = await renderView(env, "blob", templateData);
+      const html = await renderUiView(env, "blob", templateData);
       if (!html) {
-        return new Response("Failed to render template", { status: 500 });
+        return new Response("Failed to render view", { status: 500 });
       }
       return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid",
+          "X-Page-Renderer": "react-ssr",
         },
       });
     } catch (e: any) {
@@ -729,7 +715,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
             : undefined,
       };
       const progress = await getUnpackProgress(env, repoId);
-      const html = await renderView(env, "commits", {
+      const html = await renderUiView(env, "commits", {
         title: `Commits on ${ref} · ${owner}/${repo}`,
         owner,
         repo,
@@ -740,13 +726,13 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         progress,
       });
       if (!html) {
-        return new Response("Failed to render template", { status: 500 });
+        return new Response("Failed to render view", { status: 500 });
       }
       return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid",
+          "X-Page-Renderer": "react-ssr",
         },
       });
     } catch (e: any) {
@@ -758,7 +744,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     }
   });
 
-  // Merge expansion fragment endpoint: returns HTML <tr> rows for side-branch commits of a merge
+  // Merge expansion fragment endpoint: returns JSON for side-branch commits of a merge
   // Example: /:owner/:repo/commits/fragments/:oid?limit=20
   router.get(`/:owner/:repo/commits/fragments/:oid`, async (request, env, ctx) => {
     const { owner, repo, oid } = request.params as { owner: string; repo: string; oid: string };
@@ -797,21 +783,11 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         authorName: c.author?.name || "",
         when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
       }));
-      const html = await renderView(env, "commit_rows", {
-        owner,
-        repo,
-        commits,
-        compact: true,
-        mergeOf: oid,
-      });
-      if (!html) {
-        return new Response("Failed to render template", { status: 500 });
-      }
-      return new Response(html, {
+      return new Response(JSON.stringify({ owner, repo, commits, compact: true, mergeOf: oid }), {
         headers: {
-          "Content-Type": "text/html; charset=utf-8",
+          "Content-Type": "application/json; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid-fragment",
+          "X-Page-Renderer": "react-fragment-json",
         },
       });
     } catch (e: any) {
@@ -842,7 +818,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       const c = await readCommitInfo(env, repoId, oid, cacheCtx);
       const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
       const parents = (c.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
-      const html = await renderView(env, "commit", {
+      const html = await renderUiView(env, "commit", {
         title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
         owner,
         repo,
@@ -856,13 +832,13 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         message: c.message || "",
       });
       if (!html) {
-        return new Response("Failed to render template", { status: 500 });
+        return new Response("Failed to render view", { status: 500 });
       }
       return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid",
+          "X-Page-Renderer": "react-ssr",
         },
       });
     } catch (e: any) {
@@ -1067,7 +1043,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         : undefined
     );
 
-    const html = await renderView(env, "admin", {
+    const html = await renderUiView(env, "admin", {
       title: `Admin · ${owner}/${repo}`,
       owner,
       repo,
@@ -1088,13 +1064,13 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       nextMaintenanceAt,
     });
     if (!html) {
-      return new Response("Failed to render template", { status: 500 });
+      return new Response("Failed to render view", { status: 500 });
     }
     return new Response(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "liquid",
+        "X-Page-Renderer": "react-ssr",
       },
     });
   });

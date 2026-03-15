@@ -1,0 +1,575 @@
+@import "tailwindcss";
+@source inline("bg-sky-100 text-sky-900 dark:bg-sky-500/20 dark:text-sky-300 dark:border dark:border-sky-500/40");
+@source inline("bg-amber-200 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200 dark:border dark:border-amber-500/40");
+@source inline("bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200");
+@source inline("bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200");
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+  --animate-fade-in: fade-in 0.4s ease-out both;
+  --animate-slide-up: slide-up 0.35s ease-out both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply font-sans antialiased;
+    background: #f4f4f5;
+    color: #18181b;
+  }
+
+  html.dark body {
+    background: #09090b;
+    color: #e4e4e7;
+  }
+
+  *,
+  ::before,
+  ::after {
+    border-color: var(--color-zinc-200, currentcolor);
+  }
+
+  h1 {
+    @apply mb-6 text-3xl font-bold;
+  }
+
+  h2 {
+    @apply mt-6 mb-4 text-2xl font-semibold;
+  }
+
+  h3 {
+    @apply mt-4 mb-3 text-lg font-semibold;
+  }
+
+  p {
+    @apply mb-4;
+  }
+
+  a {
+    @apply text-indigo-600 transition-colors hover:text-indigo-500 dark:text-indigo-400 dark:hover:text-indigo-300;
+  }
+
+  button,
+  [role="button"] {
+    @apply cursor-pointer;
+  }
+}
+
+@utility btn {
+  @apply inline-flex items-center justify-center rounded-xl border border-transparent bg-indigo-600 px-4 py-2 font-medium text-white shadow-sm transition-all focus:outline-hidden focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2;
+
+  &:hover {
+    @apply bg-indigo-700;
+  }
+
+  &.secondary {
+    @apply border-zinc-300 bg-white text-zinc-700 shadow-none dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200;
+  }
+
+  &.secondary:hover {
+    @apply bg-zinc-50 dark:bg-zinc-700;
+  }
+
+  &.sm {
+    @apply px-3 py-1.5 text-sm;
+  }
+}
+
+@utility alert {
+  @apply mb-4 rounded-xl p-4;
+
+  &.warn {
+    @apply bg-yellow-50 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200;
+  }
+
+  &.error {
+    @apply bg-red-50 text-red-800 dark:bg-red-900/20 dark:text-red-200;
+  }
+}
+
+@utility muted {
+  @apply text-zinc-500 dark:text-zinc-400;
+}
+
+@utility list {
+  & > div,
+  & > li {
+    @apply border-b border-zinc-100 py-2 last:border-b-0 dark:border-zinc-800;
+  }
+}
+
+@utility repo-grid {
+  @apply mt-6 grid gap-6 md:grid-cols-2;
+}
+
+@utility pager {
+  @apply my-6 flex items-center justify-between rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/30;
+
+  & .perpage {
+    @apply flex gap-3 text-sm;
+  }
+
+  & .perpage a {
+    @apply rounded-sm px-2 py-1 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700;
+  }
+
+  & .nav {
+    @apply flex gap-3;
+  }
+}
+
+@utility breadcrumb {
+  @apply mb-4 flex items-center gap-2 rounded-xl bg-zinc-50 p-3 text-sm dark:bg-zinc-800/30;
+}
+
+@utility subnav {
+  @apply inline-flex items-center gap-1 rounded-xl border border-zinc-200 bg-white p-1 dark:border-zinc-700 dark:bg-zinc-900;
+}
+
+@utility tab {
+  @apply inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-zinc-600 hover:bg-zinc-100/70 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 dark:text-zinc-400 dark:hover:bg-zinc-800/40 dark:hover:text-zinc-100;
+}
+
+@utility container {
+  @apply mx-auto max-w-7xl px-4 sm:px-6;
+}
+
+@utility card {
+  @apply rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800/60 dark:bg-zinc-900/50;
+}
+
+@utility page-header {
+  @apply mb-6 flex items-center justify-between;
+}
+
+@utility segmented {
+  @apply inline-flex items-center overflow-hidden rounded-full border border-zinc-300 bg-white dark:border-zinc-700 dark:bg-zinc-900;
+
+  & .seg {
+    @apply px-3 py-1.5 text-sm;
+  }
+
+  & .seg + .seg {
+    @apply border-l border-zinc-300 dark:border-zinc-700;
+  }
+
+  & .seg.label {
+    @apply bg-zinc-50 text-zinc-500 dark:bg-zinc-800/50 dark:text-zinc-400;
+  }
+
+  & .seg.action {
+    @apply no-underline hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800/50;
+  }
+}
+
+@utility no-scrollbar {
+  &::-webkit-scrollbar {
+    display: none;
+  }
+
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@layer components {
+  :root {
+    scrollbar-color: rgb(0 0 0 / 0.12) transparent;
+  }
+
+  html.dark {
+    scrollbar-color: rgb(255 255 255 / 0.1) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  html.dark ::-webkit-scrollbar-thumb {
+    background: rgb(255 255 255 / 0.1);
+    border-radius: 3px;
+  }
+
+  html.dark ::-webkit-scrollbar-thumb:hover {
+    background: rgb(255 255 255 / 0.2);
+  }
+
+  html:not(.dark) ::-webkit-scrollbar-thumb {
+    background: rgb(0 0 0 / 0.12);
+    border-radius: 3px;
+  }
+
+  html:not(.dark) ::-webkit-scrollbar-thumb:hover {
+    background: rgb(0 0 0 / 0.2);
+  }
+
+  .page-header > :last-child:empty {
+    height: 2.5rem;
+  }
+
+  .ambient-glow {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(circle at top left, rgb(99 102 241 / 0.03), transparent 28%),
+      radial-gradient(circle at bottom right, rgb(14 165 233 / 0.03), transparent 24%);
+  }
+
+  table {
+    @apply w-full border-collapse bg-white dark:bg-zinc-900/50;
+  }
+
+  table th {
+    @apply bg-zinc-50 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-zinc-500 dark:bg-zinc-800/50 dark:text-zinc-400;
+  }
+
+  table td {
+    @apply px-4 py-3 text-sm;
+  }
+
+  table tbody tr {
+    @apply border-t border-zinc-200 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/30;
+  }
+
+  pre {
+    @apply overflow-x-auto rounded-xl bg-zinc-50 p-4 dark:bg-zinc-900;
+  }
+
+  code {
+    @apply rounded-sm bg-zinc-100 px-1 py-0.5 text-sm font-mono dark:bg-zinc-800;
+  }
+
+  pre code {
+    @apply bg-transparent p-0;
+  }
+
+  .blob-container {
+    background: #fafafa;
+    border-color: #d4d4d8;
+  }
+
+  html.dark .blob-container {
+    background: rgb(24 24 27 / 0.5);
+    border-color: rgb(39 39 42 / 0.6);
+  }
+
+  .subnav .tab[aria-current="page"] {
+    @apply bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-900/20 dark:text-indigo-300;
+  }
+
+  .ref-menu > summary {
+    list-style: none;
+  }
+
+  .ref-menu > summary::-webkit-details-marker,
+  .ref-menu > summary::marker {
+    display: none;
+    content: "";
+  }
+
+  .ref-menu[open] > summary {
+    @apply ring-2 ring-indigo-500/30;
+  }
+
+  .markdown-content {
+    @apply text-[0.95rem] leading-7 text-zinc-700 dark:text-zinc-200;
+  }
+
+  .markdown-content > *:first-child {
+    margin-top: 0;
+  }
+
+  .markdown-content > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .markdown-content h1,
+  .markdown-content h2,
+  .markdown-content h3,
+  .markdown-content h4 {
+    @apply mt-6 mb-3 font-semibold text-zinc-900 dark:text-zinc-50;
+  }
+
+  .markdown-content p,
+  .markdown-content ul,
+  .markdown-content ol,
+  .markdown-content blockquote,
+  .markdown-content pre {
+    @apply mb-4;
+  }
+
+  .markdown-content ul,
+  .markdown-content ol {
+    @apply ml-6;
+  }
+
+  .markdown-content ul {
+    list-style: disc;
+  }
+
+  .markdown-content ol {
+    list-style: decimal;
+  }
+
+  .markdown-content blockquote {
+    @apply border-l-4 border-zinc-300 pl-4 italic text-zinc-600 dark:border-zinc-700 dark:text-zinc-300;
+  }
+
+  .markdown-content img {
+    @apply inline-block max-w-full;
+  }
+
+  .markdown-content pre {
+    @apply overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900;
+  }
+
+  .markdown-content pre code,
+  #blob-code {
+    @apply font-mono text-sm;
+  }
+
+  .markdown-content pre code {
+    display: block;
+    padding: 0;
+    border-radius: 0;
+    white-space: pre;
+    background: transparent !important;
+  }
+
+  pre code.hljs,
+  .blob-container code.hljs,
+  .markdown-content pre code.hljs,
+  #blob-code.hljs {
+    background: transparent !important;
+  }
+
+  .markdown-content pre code.hljs {
+    overflow-x: visible;
+  }
+
+  #blob-pre {
+    @apply bg-transparent p-0;
+  }
+
+  pre.has-line-numbers {
+    padding: 0 !important;
+  }
+
+  .code-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: transparent;
+  }
+
+  .code-table.hljs {
+    display: table;
+    margin: 0;
+    padding: 0 !important;
+    overflow: visible;
+    background: transparent !important;
+  }
+
+  .code-table tr,
+  .code-table td {
+    border: none;
+    background: transparent;
+  }
+
+  .code-table .line-num {
+    width: 1%;
+    min-width: 3.5rem;
+    padding: 0 1rem 0 0.5rem;
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+    user-select: none;
+    border-right: 1px solid rgb(228 228 231 / 0.8);
+  }
+
+  html.dark .code-table .line-num {
+    border-right-color: rgb(63 63 70 / 0.9);
+  }
+
+  .code-table .line-num a {
+    display: block;
+    color: #a1a1aa;
+    text-decoration: none;
+  }
+
+  html.dark .code-table .line-num a {
+    color: #71717a;
+  }
+
+  .code-table .line-num a:hover {
+    color: #6366f1;
+  }
+
+  .code-table .line-code {
+    white-space: pre;
+    padding: 0 0.75rem;
+    line-height: 1.375rem;
+  }
+
+  .code-line:hover {
+    background: rgb(99 102 241 / 0.04);
+  }
+
+  html.dark .code-line:hover {
+    background: rgb(99 102 241 / 0.08);
+  }
+
+  .code-line {
+    scroll-margin-top: 6rem;
+  }
+
+  .code-line:target,
+  .code-line.line-highlight {
+    background: rgb(99 102 241 / 0.08);
+  }
+
+  html.dark .code-line:target,
+  html.dark .code-line.line-highlight {
+    background: rgb(99 102 241 / 0.15);
+  }
+
+  i[class*="bi-"]:not(.hidden) {
+    display: inline-block;
+    vertical-align: middle;
+    line-height: 1;
+  }
+
+  i[class*="bi-"].h-4.w-4,
+  i[class*="bi-"].w-4.h-4 {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+  }
+
+  i[class*="bi-"].h-5.w-5,
+  i[class*="bi-"].w-5.h-5 {
+    font-size: 1.25rem;
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+
+  i[class*="bi-"].inline,
+  .btn i[class*="bi-"],
+  .tab i[class*="bi-"] {
+    vertical-align: -0.125em;
+  }
+
+  [data-theme-toggle] i[class*="bi-"] {
+    vertical-align: middle;
+  }
+
+  html.dark [data-theme-toggle] .icon-light {
+    display: none;
+  }
+
+  html.dark [data-theme-toggle] .icon-dark {
+    display: inline-block;
+  }
+
+  html:not(.dark) [data-theme-toggle] .icon-light {
+    display: inline-block;
+  }
+
+  html:not(.dark) [data-theme-toggle] .icon-dark {
+    display: none;
+  }
+}
+
+@layer components {
+  @media (max-width: 640px) {
+    .page-header {
+      @apply flex-col items-stretch gap-3;
+    }
+
+    .page-header > :last-child:empty {
+      height: auto;
+    }
+
+    .page-header nav {
+      overflow-x: auto;
+      padding-inline: 0.25rem;
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+
+    .page-header nav::-webkit-scrollbar {
+      display: none;
+    }
+
+    #commits-table th:nth-child(3),
+    #commits-table td:nth-child(3) {
+      display: none;
+    }
+
+    #commits-table {
+      table-layout: fixed;
+    }
+
+    #commits-table th,
+    #commits-table td {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #commits-table th:nth-child(1),
+    #commits-table td:nth-child(1) {
+      width: 5.5rem;
+      white-space: nowrap;
+    }
+
+    #commits-table th:nth-child(2),
+    #commits-table td:nth-child(2) {
+      white-space: normal;
+      word-break: break-word;
+    }
+
+    #commits-table th:nth-child(4),
+    #commits-table td:nth-child(4) {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: unset;
+    }
+  }
+}

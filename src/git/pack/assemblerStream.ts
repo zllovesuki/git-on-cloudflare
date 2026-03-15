@@ -1,4 +1,4 @@
-import { hexToBytes, createLogger } from "@/common/index.ts";
+import { hexToBytes, createLogger, createDigestStream } from "@/common/index.ts";
 import {
   readPackHeaderEx,
   readPackRange,
@@ -422,7 +422,7 @@ export async function streamPackFromMultiplePacks(
     async start(controller) {
       try {
         // Create a digest stream for SHA-1
-        const digestStream = new crypto.DigestStream("SHA-1");
+        const digestStream = createDigestStream("SHA-1");
         const writer = digestStream.getWriter();
 
         // Helper to write and emit chunks

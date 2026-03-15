@@ -7,6 +7,5 @@
   "trailingComma": "es5",
   "bracketSpacing": true,
   "arrowParens": "always",
-  "endOfLine": "lf",
-  "plugins": ["@shopify/prettier-plugin-liquid"]
+  "endOfLine": "lf"
 }

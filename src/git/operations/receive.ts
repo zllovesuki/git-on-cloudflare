@@ -6,7 +6,7 @@ import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
 import { r2PackKey, r2LooseKey, packIndexKey } from "@/keys.ts";
 import { scheduleAlarmIfSooner } from "@/do/repo/scheduler.ts";
 import * as git from "isomorphic-git";
-import { createLogger } from "@/common/index.ts";
+import { asBodyInit, createLogger } from "@/common/index.ts";
 import { getDb, oidExistsInPacks, insertPackOids } from "@/do/repo/db/index.ts";
 
 // Connectivity check for receive-pack commands.
@@ -360,7 +360,7 @@ export async function receivePack(
         chunks.push(pktLine(`ng ${c.ref} ${ok ? "ok" : "invalid"}\n`));
       }
       chunks.push(flushPkt());
-      return new Response(concatChunks(chunks), {
+      return new Response(asBodyInit(concatChunks(chunks)), {
         status: 200,
         headers: {
           "Content-Type": "application/x-git-receive-pack-result",
@@ -581,7 +581,7 @@ export async function receivePack(
       "X-Repo-Empty": empty ? "1" : "0",
     };
 
-    const resp = new Response(concatChunks(chunks), {
+    const resp = new Response(asBodyInit(concatChunks(chunks)), {
       status: 200,
       headers: resHeaders,
     });

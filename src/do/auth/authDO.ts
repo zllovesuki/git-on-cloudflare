@@ -1,7 +1,7 @@
 import type { AuthStateSchema, AuthUsers, RateLimitEntry } from "./authState";
 
 import { DurableObject } from "cloudflare:workers";
-import { createLogger } from "@/common";
+import { asBufferSource, createLogger } from "@/common";
 import { asTypedStorage } from "../repo/repoState";
 import { makeOwnerRateLimitKey, makeAdminRateLimitKey } from "./authState";
 
@@ -37,7 +37,7 @@ async function hashTokenWithPBKDF2(
   const derivedBits = await crypto.subtle.deriveBits(
     {
       name: "PBKDF2",
-      salt: salt,
+      salt: asBufferSource(salt),
       iterations: iterations,
       hash: "SHA-256",
     },

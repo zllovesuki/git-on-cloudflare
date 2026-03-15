@@ -11,7 +11,7 @@ import type { RepoStateSchema } from "./repoState.ts";
 
 import { asTypedStorage, objKey } from "./repoState.ts";
 import { r2LooseKey } from "@/keys.ts";
-import { isValidOid, createInflateStream } from "@/common/index.ts";
+import { isValidOid, createInflateStream, createBlobFromBytes } from "@/common/index.ts";
 import {
   inflateAndParseHeader,
   parseCommitRefs,
@@ -387,7 +387,7 @@ export async function readCommitFromStore(
   const z = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
   // Decompress (zlib/deflate) and parse git header
   const ds = createInflateStream();
-  const stream = new Blob([z]).stream().pipeThrough(ds);
+  const stream = createBlobFromBytes(z).stream().pipeThrough(ds);
   const raw = new Uint8Array(await new Response(stream).arrayBuffer());
   // header: <type> <len>\0
   let p = 0;

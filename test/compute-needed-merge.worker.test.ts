@@ -45,12 +45,12 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
 
-  // Build a shared empty tree T
+    // Build a shared empty tree T
     const treePayload = new Uint8Array(0);
     const { oid: treeOid, zdata: treeZ } = await encodeGitObjectAndDeflate("tree", treePayload);
     await putObj(getStub, treeOid, treeZ);
 
-  // Root commit R
+    // Root commit R
     const author = `You <you@example.com> 0 +0000`;
     const committer = author;
     const msg = "root\n";
@@ -60,7 +60,7 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
     const { oid: rootOid, zdata: rootZ } = await encodeGitObjectAndDeflate("commit", rootPayload);
     await putObj(getStub, rootOid, rootZ);
 
-  // Branch A: commit A -> parent R, same tree T
+    // Branch A: commit A -> parent R, same tree T
     const aPayload = new TextEncoder().encode(
       `tree ${treeOid}\n` +
         `parent ${rootOid}\n` +
@@ -70,7 +70,7 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
     const { oid: aOid, zdata: aZ } = await encodeGitObjectAndDeflate("commit", aPayload);
     await putObj(getStub, aOid, aZ);
 
-  // Branch B: commit B -> parent R, same tree T
+    // Branch B: commit B -> parent R, same tree T
     const bPayload = new TextEncoder().encode(
       `tree ${treeOid}\n` +
         `parent ${rootOid}\n` +
@@ -80,7 +80,7 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
     const { oid: bOid, zdata: bZ } = await encodeGitObjectAndDeflate("commit", bPayload);
     await putObj(getStub, bOid, bZ);
 
-  // Merge M: parents A and B, same tree T
+    // Merge M: parents A and B, same tree T
     const mPayload = new TextEncoder().encode(
       `tree ${treeOid}\n` +
         `parent ${aOid}\n` +
@@ -91,20 +91,20 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
     const { oid: mOid, zdata: mZ } = await encodeGitObjectAndDeflate("commit", mPayload);
     await putObj(getStub, mOid, mZ);
 
-  // Case 1: want B, have A -> need only B (tree/root pruned via have closure)
+    // Case 1: want B, have A -> need only B (tree/root pruned via have closure)
     const need1 = await computeNeeded(env as any, repoId, [bOid], [aOid]);
     expect(need1).toContain(bOid);
     expect(need1).not.toContain(treeOid);
     expect(need1).not.toContain(rootOid);
 
-  // Case 2: want M, have A -> need M and B (A is known; B not in have closure; tree/root pruned)
+    // Case 2: want M, have A -> need M and B (A is known; B not in have closure; tree/root pruned)
     const need2 = await computeNeeded(env as any, repoId, [mOid], [aOid]);
     expect(need2).toContain(mOid);
     expect(need2).toContain(bOid);
     expect(need2).not.toContain(treeOid);
     expect(need2).not.toContain(rootOid);
 
-  // Case 3: have-list trimming: if B is past index 128, it is ignored and still needed
+    // Case 3: have-list trimming: if B is past index 128, it is ignored and still needed
     const dummies: string[] = Array.from(
       { length: 128 },
       (_, i) => "deadbeefdeadbeefdeadbeefdeadbeefdeadbee" + (i % 10)

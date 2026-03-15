@@ -9,7 +9,7 @@ import {
   parseTreeChildOids,
   parseTagTarget,
 } from "@/git/core/index.ts";
-import { getRepoStub, createLogger } from "@/common/index.ts";
+import { asBodyInit, getRepoStub, createLogger } from "@/common/index.ts";
 import { streamPackFromR2, streamPackFromMultiplePacks } from "@/git/pack/assemblerStream.ts";
 import { getPackCandidates } from "./packDiscovery.ts";
 import { getLimiter, countSubrequest } from "./limits.ts";
@@ -829,7 +829,7 @@ export async function handleFetchV2Streaming(
   // No wants: respond with ack-only
   if (wants.length === 0) {
     const chunks = [pktLine("acknowledgments\n"), pktLine("NAK\n"), flushPkt()];
-    return new Response(concatChunks(chunks), {
+    return new Response(asBodyInit(concatChunks(chunks)), {
       status: 200,
       headers: {
         "Content-Type": "application/x-git-upload-pack-result",
@@ -862,7 +862,7 @@ export async function handleFetchV2Streaming(
 
     chunks.push(flushPkt());
 
-    return new Response(concatChunks(chunks), {
+    return new Response(asBodyInit(concatChunks(chunks)), {
       status: 200,
       headers: {
         "Content-Type": "application/x-git-upload-pack-result",

@@ -7,6 +7,8 @@
  * - Only cache GET responses.
  */
 
+import { asBodyInit } from "@/common/webtypes.ts";
+
 const CACHE_NAME_JSON = "git-on-cf:json";
 const CACHE_NAME_OBJECTS = "git-on-cf:objects";
 
@@ -211,7 +213,7 @@ export async function cachePutObject(
     // Git objects are immutable - cache for 1 year
     headers.set("Cache-Control", "public, max-age=31536000, immutable");
 
-    const res = new Response(payload, { status: 200, headers });
+    const res = new Response(asBodyInit(payload), { status: 200, headers });
     const cache = await getObjectCache();
     await cache.put(keyReq, res);
   } catch {

@@ -1,6 +1,6 @@
 import type { GitObjectType } from "@/git/core/index.ts";
 import { objTypeCode, encodeObjHeader, concatChunks } from "@/git/core/index.ts";
-import { deflate } from "@/common/index.ts";
+import { asBufferSource, deflate } from "@/common/index.ts";
 
 /**
  * Builds a PACKv2 file from a list of thick objects (no deltas expected here).
@@ -25,7 +25,7 @@ export async function buildPackV2(
     parts.push(comp);
   }
   const body = concatChunks(parts);
-  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));
+  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", asBufferSource(body)));
   const out = new Uint8Array(body.length + 20);
   out.set(body, 0);
   out.set(sha, body.length);

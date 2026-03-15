@@ -9,3 +9,4 @@ export * from "./response.ts";
 export * from "./stub.ts";
 export * from "./progress.ts";
 export * from "./heap.ts";
+export * from "./webtypes.ts";

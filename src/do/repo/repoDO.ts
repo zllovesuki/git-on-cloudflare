@@ -12,7 +12,14 @@ import {
   parseGitObject,
   indexPackOnly,
 } from "@/git/index.ts";
-import { text, createLogger, isValidOid, bytesToHex, createInflateStream } from "@/common/index.ts";
+import {
+  text,
+  createLogger,
+  isValidOid,
+  bytesToHex,
+  createInflateStream,
+  createBlobFromBytes,
+} from "@/common/index.ts";
 import { r2PackKey } from "@/keys.ts";
 import {
   enqueueHydrationTask,
@@ -380,11 +387,11 @@ export class RepoDurableObject extends DurableObject {
       // This ensures streaming fetch operations will work correctly
 
       // First, decompress the objects to get their raw payloads
-      const treeStream = new Blob([treeZ]).stream().pipeThrough(createInflateStream());
+      const treeStream = createBlobFromBytes(treeZ).stream().pipeThrough(createInflateStream());
       const treeRaw = new Uint8Array(await new Response(treeStream).arrayBuffer());
       const treeParsed = parseGitObject(treeRaw);
 
-      const commitStream = new Blob([commitZ]).stream().pipeThrough(createInflateStream());
+      const commitStream = createBlobFromBytes(commitZ).stream().pipeThrough(createInflateStream());
       const commitRaw = new Uint8Array(await new Response(commitStream).arrayBuffer());
       const commitParsed = parseGitObject(commitRaw);
 

@@ -1,10 +1,8 @@
 /**
- * Web utilities - formatting, rendering, and UI
+ * Web utilities for formatting, syntax, validation, HTTP, and MIME helpers.
  */
 
 export * from "./format.ts";
-export * from "./render.ts";
-export * from "./templates.ts";
 export * from "./syntax.ts";
 export * from "./validation.ts";
 export * from "./http.ts";

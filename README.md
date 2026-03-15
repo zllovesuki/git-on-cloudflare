@@ -14,7 +14,7 @@ Host unlimited private Git repositories at the edge with <50ms response times gl
 - **Two-tier caching** reducing latency from 200ms to <50ms for hot paths
 - **Streaming pack assembly** from R2 with range reads for efficient clones
 - **Time-budgeted background unpacking** handles large pushes without blocking
-- **Modern web UI** with Tailwind CSS v4, Liquid templates, and dark mode (default)
+- **Modern web UI** with Tailwind CSS v4, React SSR, and focused client islands
 - **Interactive merge commit exploration** - expand merge commits to see side branch history
 - **Safer raw views**: `text/plain` for `/raw` by default and same‑origin Referer check for `/rawpath` to prevent hotlinking
 
@@ -26,8 +26,7 @@ git clone https://github.com/zllovesuki/git-on-cloudflare
 cd git-on-cloudflare
 npm install
 
-# Build CSS (one‑time) and start locally (no Docker required)
-npm run build:css
+# Start locally with Vite + Workers SSR (no Docker required)
 npm run dev
 
 # Push any repo to it
@@ -37,7 +36,7 @@ git push http://localhost:8787/test/myrepo main
 
 Visit `http://localhost:8787/test/myrepo` to browse your code. That's it — you now have a fully functional Git server.
 
-Tip: during active UI work, run `npm run watch:css` in another terminal to rebuild styles on change.
+TSX edits trigger Vite-powered Worker reloads and CSS changes hot-update through the client entry.
 
 ## Technical Architecture
 
@@ -47,7 +46,7 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 
 - **Durable Objects** provide linearizable consistency for refs/HEAD without coordination
 - **R2 storage** for pack files and objects with range-read support for streaming
-- **Workers** handle the Git protocol, pack negotiation, and smart HTTP transport
+- **Workers** handle the Git protocol, pack negotiation, smart HTTP transport, and React server rendering
 - **Two-tier caching**: UI responses (60s-1hr TTL), Git objects (1 year, immutable)
 
 ### Performance Characteristics
@@ -66,7 +65,7 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 - Receive-pack queue: at most 2 concurrent pushes (one-deep).
 - PBKDF2-SHA256 (100k iterations) for auth tokens
 - Background object mirroring from DO to R2 for read scaling
-- Modern web UI with Tailwind CSS v4 and Liquid templates
+- Modern web UI with Tailwind CSS v4, React page components, and worker-side SSR
 - SQLite-backed metadata inside Durable Objects using `drizzle-orm/durable-sqlite`
 - Structured JSON logging with `LOG_LEVEL` (debug/info/warn/error)
 

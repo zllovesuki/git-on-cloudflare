@@ -16,15 +16,6 @@
   "limits": {
     "cpu_ms": 300000
   },
-  "rules": [
-    {
-      "type": "Text",
-      "globs": [
-        "**/*.sql"
-      ],
-      "fallthrough": true
-    }
-  ],
   "durable_objects": {
     "bindings": [
       {
@@ -66,11 +57,9 @@
   "observability": {
     "enabled": true
   },
-  // Static assets served from src/assets and accessible via env.ASSETS
   "assets": {
     "binding": "ASSETS",
-    "directory": "src/assets",
-    // Prevent assets layer from mapping /auth -> auth.html (Worker should handle /auth)
+    "directory": "dist/client",
     "html_handling": "none"
   },
   // Environment variables (text/JSON)

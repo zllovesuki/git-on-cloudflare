@@ -1,5 +1,5 @@
 import { packIndexKey } from "@/keys.ts";
-import { hexToBytes, createLogger } from "@/common/index.ts";
+import { asBufferSource, hexToBytes, createLogger } from "@/common/index.ts";
 import {
   encodeOfsDeltaDistance,
   mapWithConcurrency,
@@ -332,7 +332,7 @@ export async function assemblePackFromR2(
   }
 
   // Append SHA-1 trailer
-  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));
+  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", asBufferSource(body)));
   const out = new Uint8Array(body.byteLength + 20);
   out.set(body, 0);
   out.set(sha, body.byteLength);
@@ -768,7 +768,7 @@ export async function assemblePackFromMultiplePacks(
     body.set(payload, p);
     if (!n.m.wholePack) r2PayloadGets++;
   }
-  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));
+  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", asBufferSource(body)));
   const out = new Uint8Array(body.byteLength + 20);
   out.set(body, 0);
   out.set(sha, body.byteLength);

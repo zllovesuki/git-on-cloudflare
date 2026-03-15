@@ -4,7 +4,7 @@
 
 import { parseGitObject, type GitObjectType } from "./objects.ts";
 import { parseCommitText } from "./commitParse.ts";
-import { createInflateStream, bytesToHex } from "@/common/index.ts";
+import { createInflateStream, bytesToHex, createBlobFromBytes } from "@/common/index.ts";
 
 const td = new TextDecoder();
 
@@ -16,7 +16,7 @@ export async function inflateAndParseHeader(
   zdata: Uint8Array
 ): Promise<{ type: GitObjectType; payload: Uint8Array } | null> {
   try {
-    const stream = new Blob([zdata]).stream().pipeThrough(createInflateStream());
+    const stream = createBlobFromBytes(zdata).stream().pipeThrough(createInflateStream());
     const raw = new Uint8Array(await new Response(stream).arrayBuffer());
     const { type, payload } = parseGitObject(raw);
     return { type, payload };
