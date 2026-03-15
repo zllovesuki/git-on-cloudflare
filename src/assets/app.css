@@ -325,6 +325,10 @@
     background-color: #09090b; /* zinc-950 */
     color: #e4e4e7; /* zinc-200 */
   }
+  html.dark .blob-container {
+    background-color: rgba(24, 24, 27, 0.5); /* zinc-900/50 */
+    border-color: rgba(39, 39, 42, 0.6); /* zinc-800/60 */
+  }
 
   /* Ambient glow background (disabled – flat zinc bg) */
   .ambient-glow {
@@ -421,8 +425,20 @@
     @apply text-sm font-mono;
   }
 
+  /* Override highlight.js theme backgrounds so our zinc containers show through */
+  pre code.hljs,
+  .blob-container code.hljs,
+  .markdown-content pre code.hljs {
+    background: transparent !important;
+  }
+
   code {
     @apply px-1 py-0.5 bg-zinc-100 dark:bg-zinc-800 rounded-sm text-sm font-mono;
+  }
+
+  /* Inline code inside highlighted blocks should not get the inline code background */
+  pre code {
+    @apply bg-transparent p-0;
   }
 
   /* Refs popover styles */
