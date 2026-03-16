@@ -1,4 +1,4 @@
-import type { TreeEntry, HeadInfo, Ref } from "@/git";
+import type { TreeEntry, HeadInfo, Ref, CommitDiffResult, CommitFilePatchResult } from "@/git";
 import type { CacheContext } from "@/cache";
 import type { debugState } from "@/do/repo/debug";
 import { getConfig } from "@/do/repo/repoConfig.ts";
@@ -10,6 +10,8 @@ import {
   listCommitsFirstParentRange,
   listMergeSideFirstParent,
   readCommitInfo,
+  listCommitChangedFiles,
+  readCommitFilePatch,
   readBlobStream,
 } from "@/git";
 import { repoKey } from "@/keys";
@@ -800,6 +802,60 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Commit details
+  router.get(`/:owner/:repo/commit/:oid/diff`, async (request, env, ctx) => {
+    const { owner, repo, oid } = request.params;
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
+    }
+    if (!OID_RE.test(oid)) {
+      return badRequest(env, "Invalid commit OID", "Commit id must be 40-hex", {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(oid),
+      });
+    }
+    const url = new URL(request.url);
+    const path = url.searchParams.get("path") || "";
+    if (!path || !isValidPath(path)) {
+      return badRequest(env, "Invalid path", "Path contains invalid characters or is too long", {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(oid),
+        path,
+      });
+    }
+    const repoId = repoKey(owner, repo);
+    try {
+      const cacheCtx: CacheContext = { req: request, ctx };
+      const patchCacheKey = buildCacheKeyFrom(request, "/_cache/commit-patch", {
+        repo: repoId,
+        oid,
+        path,
+        v: "1",
+      });
+      const patch = await cacheOrLoadJSONWithTTL<CommitFilePatchResult>(
+        patchCacheKey,
+        async () => await readCommitFilePatch(env, repoId, oid, path, cacheCtx),
+        () => 86400,
+        ctx
+      );
+      return new Response(JSON.stringify(patch), {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          "X-Page-Renderer": "react-fragment-json",
+        },
+      });
+    } catch (e: any) {
+      return handleError(env, e, `Error · ${owner}/${repo}`, {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(oid),
+        path,
+      });
+    }
+  });
+
   router.get(`/:owner/:repo/commit/:oid`, async (request, env, ctx) => {
     const { owner, repo, oid } = request.params;
     if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
@@ -816,12 +872,24 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     try {
       const cacheCtx: CacheContext = { req: request, ctx };
       const c = await readCommitInfo(env, repoId, oid, cacheCtx);
+      const diffCacheKey = buildCacheKeyFrom(request, "/_cache/commit-diff", {
+        repo: repoId,
+        oid,
+        v: "1",
+      });
+      const diff = await cacheOrLoadJSONWithTTL<CommitDiffResult>(
+        diffCacheKey,
+        async () => await listCommitChangedFiles(env, repoId, oid, cacheCtx),
+        () => 86400,
+        ctx
+      );
       const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
       const parents = (c.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
       const html = await renderUiView(env, "commit", {
         title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
         owner,
         repo,
+        commitOid: c.oid,
         refEnc: encodeURIComponent(c.oid),
         commitShort: c.oid.slice(0, 7),
         authorName: c.author?.name || "",
@@ -830,6 +898,17 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         parents,
         treeShort: (c.tree || "").slice(0, 7),
         message: c.message || "",
+        diffBaseRefEnc: diff?.baseCommitOid ? encodeURIComponent(diff.baseCommitOid) : "",
+        diffCompareMode: diff?.compareMode || "root",
+        diffEntries: diff?.entries || [],
+        diffSummary: {
+          added: diff?.added || 0,
+          modified: diff?.modified || 0,
+          deleted: diff?.deleted || 0,
+          total: diff?.total || 0,
+        },
+        diffTruncated: diff?.truncated || false,
+        diffTruncateReason: diff?.truncateReason || "",
       });
       if (!html) {
         return new Response("Failed to render view", { status: 500 });

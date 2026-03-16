@@ -8,6 +8,7 @@ import { getViewDefinition } from "./registry";
 function needsHighlightTheme(name: string, data: Record<string, unknown>): boolean {
   return (
     name === "blob" ||
+    name === "commit" ||
     (name === "overview" && typeof data.readmeMd === "string" && data.readmeMd.length > 0)
   );
 }

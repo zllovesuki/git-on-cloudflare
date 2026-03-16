@@ -10,7 +10,7 @@
     "deploy": "npm run build && wrangler deploy",
     "test": "ava",
     "test:workers": "vitest run --config vitest.config.ts",
-    "test:auth": "vitest run --config vitest.auth.config.ts",
+    "test:auth": "vitest run --config vitest.config.ts test/auth.worker.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",

@@ -5,6 +5,7 @@ import "./styles.css";
 
 import { initAuthAdmin } from "@/ui/islands/auth-admin";
 import { initBlobActions } from "@/ui/islands/blob-actions";
+import { initCommitDiffExpander } from "@/ui/islands/commit-diff-expander";
 import { initCodeLineAnchors } from "@/ui/islands/code-line-anchors";
 import { initMergeExpander } from "@/ui/islands/merge-expander";
 import { initRefPicker } from "@/ui/islands/ref-picker";
@@ -23,6 +24,7 @@ function onReady(callback: () => void) {
 onReady(() => {
   initThemeToggle();
   initRefPicker();
+  initCommitDiffExpander();
   initMergeExpander();
   initBlobActions();
   initCodeLineAnchors();

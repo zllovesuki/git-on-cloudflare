@@ -4,6 +4,13 @@ import path from "path";
 import { BASE_TEST_BINDINGS } from "./test/vitest.bindings.ts";
 import { defineConfig } from "vitest/config";
 
+const AUTH_TEST_FILE = "test/auth.worker.test.ts";
+const OPTIMIZED_DEPS = ["sanitize-html", "postcss", "source-map-js"];
+const INLINE_DEPS = ["isomorphic-git", "@noble/hashes", ...OPTIMIZED_DEPS];
+const isAuthSuite =
+  process.env.npm_lifecycle_event === "test:auth" ||
+  process.argv.some((arg) => arg.includes("auth.worker.test.ts"));
+
 export default defineConfig({
   plugins: [
     cloudflareTest({
@@ -24,8 +31,10 @@ export default defineConfig({
         cachePersist: false,
         // Silence compatibility date warnings by matching installed runtime
         compatibilityDate: "2025-09-02",
-        // Ensure centralized auth is disabled in tests (no admin token)
-        bindings: { ...BASE_TEST_BINDINGS, AUTH_ADMIN_TOKEN: "" },
+        bindings: {
+          ...BASE_TEST_BINDINGS,
+          AUTH_ADMIN_TOKEN: isAuthSuite ? "admin" : "",
+        },
       },
     }),
   ],
@@ -35,9 +44,21 @@ export default defineConfig({
     },
   },
   // Inline deps at the vite-node server level to avoid SSR optimizer resolution issues
-  server: { deps: { inline: ["isomorphic-git", "@noble/hashes"] } },
+  server: {
+    deps: {
+      inline: INLINE_DEPS,
+    },
+  },
   test: {
-    include: ["test/**/*.worker.test.ts"],
-    exclude: ["test/auth.worker.test.ts"],
+    include: isAuthSuite ? [AUTH_TEST_FILE] : ["test/**/*.worker.test.ts"],
+    exclude: isAuthSuite ? [] : [AUTH_TEST_FILE],
+    deps: {
+      optimizer: {
+        ssr: {
+          enabled: true,
+          include: OPTIMIZED_DEPS,
+        },
+      },
+    },
   },
 });

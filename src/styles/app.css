@@ -573,3 +573,259 @@
     }
   }
 }
+
+/* ── Diff Viewer ──────────────────────────────────────────────── */
+
+@layer components {
+  .diff-viewer {
+    @apply rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800/60 dark:bg-zinc-900/50;
+    overflow: hidden;
+  }
+
+  /* Summary bar */
+  .diff-summary {
+    @apply flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-800;
+  }
+
+  .diff-summary-stats {
+    @apply flex flex-wrap items-center gap-3 text-sm;
+  }
+
+  .diff-stat-add {
+    @apply font-medium text-green-700 dark:text-green-400;
+  }
+
+  .diff-stat-mod {
+    @apply font-medium text-amber-700 dark:text-amber-400;
+  }
+
+  .diff-stat-del {
+    @apply font-medium text-red-700 dark:text-red-400;
+  }
+
+  .diff-compare-label {
+    @apply rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300;
+  }
+
+  /* File list */
+  .diff-file-list {
+    /* no table – just stacked cards */
+  }
+
+  .diff-file-entry {
+    @apply border-b border-zinc-100 last:border-b-0 dark:border-zinc-800/60;
+  }
+
+  .diff-file-row {
+    @apply flex items-center justify-between gap-3 px-5 py-3 transition-colors;
+  }
+
+  .diff-file-row:hover {
+    @apply bg-zinc-50/60 dark:bg-zinc-800/20;
+  }
+
+  .diff-file-info {
+    @apply flex items-center gap-3 overflow-hidden;
+    min-width: 0;
+  }
+
+  .diff-file-path {
+    @apply truncate font-mono text-sm;
+  }
+
+  .diff-file-path a {
+    @apply no-underline hover:underline;
+  }
+
+  /* Badges */
+  .diff-badge {
+    @apply inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-xs font-bold;
+  }
+
+  .diff-badge-add {
+    @apply bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300;
+  }
+
+  .diff-badge-mod {
+    @apply bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300;
+  }
+
+  .diff-badge-del {
+    @apply bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300;
+  }
+
+  /* Toggle button */
+  .diff-toggle-btn {
+    @apply inline-flex flex-shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs font-medium text-zinc-600 transition-all hover:border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-700;
+  }
+
+  .diff-toggle-btn.active {
+    @apply border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300;
+  }
+
+  .diff-toggle-icon {
+    @apply text-[0.7rem] leading-none;
+  }
+
+  /* Expanded content area */
+  .diff-expand-area {
+    @apply border-t border-zinc-100 dark:border-zinc-800/60;
+  }
+
+  /* Patch container */
+  .diff-patch-container {
+    overflow-x: auto;
+    overflow-y: auto;
+    max-height: 32rem;
+  }
+
+  .diff-patch-pre {
+    margin: 0 !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+  }
+
+  .diff-patch-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: transparent;
+  }
+
+  .diff-patch-table.hljs {
+    display: table;
+    margin: 0;
+    padding: 0 !important;
+    overflow: visible;
+    background: transparent !important;
+  }
+
+  .diff-patch-table tr,
+  .diff-patch-table td {
+    border: none !important;
+    background: transparent;
+    padding: 0;
+  }
+
+  .diff-patch-table tr:hover {
+    background: transparent;
+  }
+
+  /* Gutter (prefix column: +/-/space) */
+  .diff-gutter {
+    width: 1%;
+    min-width: 1.25rem;
+    padding: 0 0.25rem 0 0.75rem !important;
+    text-align: center;
+    vertical-align: top;
+    white-space: pre;
+    user-select: none;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.375rem;
+    color: #a1a1aa;
+  }
+
+  html.dark .diff-gutter {
+    color: #71717a;
+  }
+
+  /* Code cell */
+  .diff-code {
+    white-space: pre;
+    padding: 0 0.75rem 0 0.25rem !important;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.375rem;
+  }
+
+  /* Line-level diff coloring - light */
+  .diff-line-add {
+    background: rgb(187 247 208 / 0.35) !important;
+  }
+
+  .diff-line-add .diff-gutter {
+    color: #16a34a;
+  }
+
+  .diff-line-del {
+    background: rgb(254 202 202 / 0.4) !important;
+  }
+
+  .diff-line-del .diff-gutter {
+    color: #dc2626;
+  }
+
+  .diff-line-hunk {
+    background: rgb(219 234 254 / 0.4) !important;
+  }
+
+  .diff-line-hunk .diff-code {
+    color: #6366f1;
+    font-style: italic;
+  }
+
+  .diff-line-hunk .diff-gutter {
+    color: #6366f1;
+  }
+
+  /* Line-level diff coloring - dark */
+  html.dark .diff-line-add {
+    background: rgb(22 101 52 / 0.25) !important;
+  }
+
+  html.dark .diff-line-add .diff-gutter {
+    color: #4ade80;
+  }
+
+  html.dark .diff-line-del {
+    background: rgb(153 27 27 / 0.25) !important;
+  }
+
+  html.dark .diff-line-del .diff-gutter {
+    color: #f87171;
+  }
+
+  html.dark .diff-line-hunk {
+    background: rgb(55 48 163 / 0.2) !important;
+  }
+
+  html.dark .diff-line-hunk .diff-code {
+    color: #a5b4fc;
+  }
+
+  html.dark .diff-line-hunk .diff-gutter {
+    color: #a5b4fc;
+  }
+
+  /* Loading state */
+  .diff-loading {
+    @apply flex items-center gap-2 px-5 py-4 text-sm text-zinc-500 dark:text-zinc-400;
+  }
+
+  .diff-spinner {
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: diff-spin 0.6s linear infinite;
+  }
+
+  @keyframes diff-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Skip message */
+  .diff-skip-msg {
+    @apply px-5 py-4 text-sm italic text-zinc-500 dark:text-zinc-400;
+  }
+
+  /* Empty state */
+  .diff-empty {
+    @apply px-5 py-6 text-center text-sm text-zinc-500 dark:text-zinc-400;
+  }
+}
