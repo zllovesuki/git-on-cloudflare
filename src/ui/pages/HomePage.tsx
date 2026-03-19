@@ -3,8 +3,8 @@ import { Rocket } from "lucide-react";
 export function HomePage() {
   return (
     <div className="animate-slide-up space-y-6">
-      <section className="rounded-2xl border border-indigo-500/20 bg-white p-6 dark:bg-zinc-900/80">
-        <span className="mb-2 inline-block text-xs font-semibold uppercase tracking-wider text-indigo-500 dark:text-indigo-400">
+      <section className="rounded-2xl border border-accent-500/20 bg-white p-6 dark:bg-zinc-900/80">
+        <span className="mb-2 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
           Welcome
         </span>
         <h2 className="m-0 text-lg font-semibold">git-on-cloudflare</h2>
@@ -14,11 +14,11 @@ export function HomePage() {
       </section>
       <div className="space-y-4">
         <div className="card p-6">
-          <span className="mb-2 inline-block text-xs font-semibold uppercase tracking-wider text-indigo-500 dark:text-indigo-400">
+          <span className="mb-2 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
             Quick Start
           </span>
           <h3 className="flex items-center gap-2">
-            <Rocket className="inline h-4 w-4 text-indigo-500" aria-hidden="true" />
+            <Rocket className="inline h-4 w-4 text-accent-500" aria-hidden="true" />
             Get Started
           </h3>
           <ul className="list space-y-2">

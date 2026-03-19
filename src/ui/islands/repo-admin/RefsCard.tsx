@@ -40,7 +40,7 @@ export function RefsCard({ refs }: RefsCardProps) {
                       <span
                         className={`rounded px-2 py-1 text-xs ${
                           kind === "branch"
-                            ? "bg-indigo-100 dark:bg-indigo-900"
+                            ? "bg-accent-100 dark:bg-accent-900"
                             : kind === "tag"
                               ? "bg-green-100 dark:bg-green-900"
                               : "bg-zinc-100 dark:bg-zinc-800"

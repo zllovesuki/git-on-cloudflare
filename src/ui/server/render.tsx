@@ -36,7 +36,7 @@ export async function renderUiView(
       assets={assets}
       needsHighlight={needsHighlightTheme(name, data)}
     >
-      <AppLayout>{page}</AppLayout>
+      <AppLayout currentView={name}>{page}</AppLayout>
     </Document>
   );
 

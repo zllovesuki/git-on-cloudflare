@@ -24,11 +24,11 @@ export function RepoNav({ owner, repo, refEnc, currentTab, showRefDropdown = tru
   return (
     <header className="page-header">
       <div className="font-semibold text-lg">
-        <a href={`/${owner}`} className="hover:text-indigo-600 dark:hover:text-indigo-400">
+        <a href={`/${owner}`} className="hover:text-accent-600 dark:hover:text-accent-400">
           {owner}
         </a>
         <span className="mx-1 text-zinc-500 dark:text-zinc-400">/</span>
-        <a href={`/${owner}/${repo}`} className="hover:text-indigo-600 dark:hover:text-indigo-400">
+        <a href={`/${owner}/${repo}`} className="hover:text-accent-600 dark:hover:text-accent-400">
           {repo}
         </a>
       </div>

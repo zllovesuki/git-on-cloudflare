@@ -32,7 +32,7 @@ export function DebugToolsCard({
               type="text"
               id="debug-oid"
               placeholder="Enter 40-character SHA-1 hash"
-              className="flex-1 rounded-xl border border-zinc-300 bg-white px-3 py-2 font-mono text-sm focus:ring-2 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800"
+              className="flex-1 rounded-xl border border-zinc-300 bg-white px-3 py-2 font-mono text-sm focus:ring-2 focus:ring-accent-500 dark:border-zinc-700 dark:bg-zinc-800"
               pattern="[a-f0-9]{40}"
               value={debugOid}
               onChange={(event) => setDebugOid(event.target.value)}

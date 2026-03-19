@@ -134,7 +134,7 @@ export function RepoOverviewCard({
           <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
             Hydration
           </div>
-          <div className="font-mono text-sm text-indigo-600 dark:text-indigo-400">
+          <div className="font-mono text-sm text-accent-600 dark:text-accent-400">
             {hydrationStatus}
           </div>
         </div>

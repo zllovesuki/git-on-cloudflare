@@ -33,11 +33,11 @@ export function HydrationCard({
         correctness, not just performance.
       </p>
       {hydrationRunning ? (
-        <div className="mb-4 rounded-xl bg-indigo-50 p-3 dark:bg-indigo-900/20">
+        <div className="mb-4 rounded-xl bg-accent-50 p-3 dark:bg-accent-900/20">
           <div className="text-sm">
             <strong>
               <Info
-                className="mr-1 inline h-4 w-4 align-[-2px] text-indigo-600 dark:text-indigo-400"
+                className="mr-1 inline h-4 w-4 align-[-2px] text-accent-600 dark:text-accent-400"
                 aria-hidden="true"
               />
               Running:

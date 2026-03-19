@@ -52,7 +52,7 @@ export function CommitsPage({
     <>
       <RepoNav owner={owner} repo={repo} refEnc={refEnc} currentTab="commits" />
       <ProgressBanner progress={progress} />
-      <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-indigo-500 dark:text-indigo-400">
+      <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
         History
       </span>
       <h2>Commits on {refLabel}</h2>

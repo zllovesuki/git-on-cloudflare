@@ -65,7 +65,7 @@ export function CommitPage({
   return (
     <>
       <RepoNav owner={owner} repo={repo} refEnc={refEnc} currentTab="commits" />
-      <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-indigo-500 dark:text-indigo-400">
+      <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
         Commit Detail
       </span>
       <h2>Commit {commitShort}</h2>

@@ -58,7 +58,7 @@ export function BlobPage(props: BlobPageProps) {
   return (
     <>
       <RepoNav owner={owner} repo={repo} refEnc={refEnc} currentTab="browse" />
-      <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-indigo-500 dark:text-indigo-400">
+      <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
         File
       </span>
       <h2>Blob: {fileName}</h2>

@@ -73,7 +73,7 @@ function RefPickerSection({
         return isCurrent ? (
           <span
             key={`${title}-${item.name}`}
-            className="flex items-center gap-2 rounded border border-indigo-200 bg-indigo-50 px-2 py-1.5 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-300"
+            className="flex items-center gap-2 rounded border border-accent-200 bg-accent-50 px-2 py-1.5 text-accent-700 dark:border-accent-800 dark:bg-accent-900/20 dark:text-accent-300"
           >
             <Check className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
             <Icon
@@ -238,7 +238,7 @@ export function RefPickerIsland({ owner, repo, currentRef }: RefPickerProps) {
                     <div className="px-2 py-1 text-xs uppercase text-zinc-500 dark:text-zinc-400">
                       Current
                     </div>
-                    <span className="flex items-center gap-2 rounded border border-indigo-200 bg-indigo-50 px-2 py-1.5 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-300">
+                    <span className="flex items-center gap-2 rounded border border-accent-200 bg-accent-50 px-2 py-1.5 text-accent-700 dark:border-accent-800 dark:bg-accent-900/20 dark:text-accent-300">
                       <Check className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
                       <span className="font-medium">
                         {/^[0-9a-f]{40}$/i.test(currentRef)

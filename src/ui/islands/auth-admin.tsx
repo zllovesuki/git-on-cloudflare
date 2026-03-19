@@ -170,7 +170,7 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
     <div className="animate-slide-up">
       <header className="page-header">
         <div>
-          <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-indigo-500 dark:text-indigo-400">
+          <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
             Settings
           </span>
           <h2 className="m-0">Auth Management</h2>
@@ -199,7 +199,7 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
                   localStorage.setItem("adminToken", nextValue);
                 } catch {}
               }}
-              className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800"
+              className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:border-zinc-700 dark:bg-zinc-800"
             />
             <button className="btn w-full sm:w-auto" type="button" onClick={() => void loadUsers()}>
               {loadingUsers ? "Loading..." : "Load Users"}
@@ -216,13 +216,13 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
               placeholder="owner (e.g., rachel)"
               value={owner}
               onChange={(event) => setOwner(event.target.value)}
-              className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800"
+              className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:border-zinc-700 dark:bg-zinc-800"
             />
             <input
               placeholder="token (raw)"
               value={token}
               onChange={(event) => setToken(event.target.value)}
-              className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800"
+              className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:border-zinc-700 dark:bg-zinc-800"
             />
             <button
               className="btn w-full sm:w-auto"
@@ -299,7 +299,7 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
           </div>
         )}
       </div>
-      <div className="rounded-2xl bg-indigo-50 p-6 dark:bg-indigo-900/20">
+      <div className="rounded-2xl bg-accent-50 p-6 dark:bg-accent-900/20">
         <h3 className="mb-3 text-lg font-semibold">Usage examples</h3>
         <ul className="space-y-2 text-zinc-600 dark:text-zinc-400">
           <li>

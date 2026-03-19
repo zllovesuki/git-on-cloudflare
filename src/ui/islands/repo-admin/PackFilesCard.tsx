@@ -61,7 +61,7 @@ export function PackFilesCard({ packCount, packStats, pending, removePack }: Pac
                     <span
                       className={`rounded px-2 py-1 text-xs ${
                         kind === "hydration"
-                          ? "bg-indigo-100 dark:bg-indigo-900"
+                          ? "bg-accent-100 dark:bg-accent-900"
                           : kind === "test"
                             ? "bg-yellow-100 dark:bg-yellow-900"
                             : "bg-green-100 dark:bg-green-900"

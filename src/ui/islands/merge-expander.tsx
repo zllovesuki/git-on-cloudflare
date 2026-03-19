@@ -113,7 +113,7 @@ export function MergeExpanderIsland({ owner, repo, commits }: MergeExpanderProps
             const mergeRows = mergeRowsByOid[mergeOid] || [];
             const error = errorByOid[mergeOid];
             const mergeRowClass = isMerge
-              ? "cursor-pointer border-l-4 border-indigo-400 bg-indigo-50/30 hover:bg-indigo-50/50 dark:border-indigo-600 dark:bg-indigo-900/10 dark:hover:bg-indigo-900/20"
+              ? "cursor-pointer border-l-4 border-accent-400 bg-accent-50/30 hover:bg-accent-50/50 dark:border-accent-600 dark:bg-accent-900/10 dark:hover:bg-accent-900/20"
               : "";
 
             return (

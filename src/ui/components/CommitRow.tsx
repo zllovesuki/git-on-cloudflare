@@ -35,7 +35,7 @@ export function CommitRow({
 }: CommitRowProps) {
   const classes = [
     compact
-      ? "text-sm subrow bg-indigo-50/20 dark:bg-indigo-900/10 border-l-2 border-b border-b-zinc-200 border-l-indigo-400 dark:border-b-zinc-800 dark:border-l-indigo-700"
+      ? "text-sm subrow bg-accent-50/20 dark:bg-accent-900/10 border-l-2 border-b border-b-zinc-200 border-l-accent-400 dark:border-b-zinc-800 dark:border-l-accent-700"
       : "",
     rowClass || "",
   ]
