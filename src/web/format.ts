@@ -75,13 +75,27 @@ export function bytesToText(bytes: Uint8Array): string {
 }
 
 export function formatWhen(epochSeconds: number, tz: string): string {
-  // Display local time + tz offset string
   try {
-    const d = new Date(epochSeconds * 1000);
-    // Keep it simple: ISO date without milliseconds and preserve provided tz offset string
-    const iso = d.toISOString(); // e.g., 2025-09-21T10:08:06.000Z
-    const noMs = iso.replace(/\.\d{3}Z$/, "Z");
-    return `${noMs.replace("T", " ").replace("Z", " UTC")} (${tz})`;
+    const offsetMatch = tz.match(/^([+-])(\d{2})(\d{2})$/);
+    const utcDate = new Date(epochSeconds * 1000);
+    if (!offsetMatch) {
+      const iso = utcDate.toISOString();
+      const noMs = iso.replace(/\.\d{3}Z$/, "Z");
+      return noMs.replace("T", " ").replace("Z", " UTC");
+    }
+
+    const sign = offsetMatch[1] === "-" ? -1 : 1;
+    const hours = Number(offsetMatch[2]);
+    const minutes = Number(offsetMatch[3]);
+    const offsetMinutes = sign * (hours * 60 + minutes);
+    const localDate = new Date(utcDate.getTime() + offsetMinutes * 60_000);
+    const pad = (value: number) => String(value).padStart(2, "0");
+
+    return (
+      `${localDate.getUTCFullYear()}-${pad(localDate.getUTCMonth() + 1)}-` +
+      `${pad(localDate.getUTCDate())} ${pad(localDate.getUTCHours())}:` +
+      `${pad(localDate.getUTCMinutes())}:${pad(localDate.getUTCSeconds())} ${tz}`
+    );
   } catch {
     return String(epochSeconds);
   }
