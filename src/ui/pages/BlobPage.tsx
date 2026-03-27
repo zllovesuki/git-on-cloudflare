@@ -100,7 +100,9 @@ export function BlobPage(props: BlobPageProps) {
           </IslandHost>
         </div>
         <div className={`${isMarkdown ? "p-5" : isBinary || tooLarge ? "p-3" : "p-1"}`}>
-          {tooLarge ? <div className="muted">File too large to preview.</div> : null}
+          {tooLarge ? (
+            <div className="text-zinc-500 dark:text-zinc-400">File too large to preview.</div>
+          ) : null}
           {!tooLarge && isImage && mediaSrc ? (
             <div className="flex items-center justify-center">
               <img src={mediaSrc} alt={fileName} className="max-w-full rounded-md" loading="lazy" />
@@ -123,7 +125,7 @@ export function BlobPage(props: BlobPageProps) {
             />
           ) : null}
           {!tooLarge && isBinary && !isImage && !isPdf ? (
-            <div className="muted">Binary file.</div>
+            <div className="text-zinc-500 dark:text-zinc-400">Binary file.</div>
           ) : null}
           {!tooLarge && !isBinary && !isMarkdown && codeText !== undefined ? (
             <CodeViewer code={codeText} language={codeLang || null} />

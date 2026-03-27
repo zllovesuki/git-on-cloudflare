@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Clipboard } from "lucide-react";
 import { shortRefName } from "@/git/refDisplay.ts";
+import { Card } from "@/ui/components/ui/card";
 import { formatSampleBytes, shortValue } from "./format";
 import type { AdminState, PackStat } from "./types";
 
@@ -42,7 +43,7 @@ export function RepoOverviewCard({
   }
 
   return (
-    <div className="card p-6">
+    <Card>
       <h2 className="mb-4 text-xl font-semibold">Repository Overview</h2>
       <div className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3 lg:grid-cols-4">
         <div>
@@ -155,6 +156,6 @@ export function RepoOverviewCard({
           </div>
         </div>
       </div>
-    </div>
+    </Card>
   );
 }

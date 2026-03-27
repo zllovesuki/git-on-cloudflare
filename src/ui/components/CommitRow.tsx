@@ -80,8 +80,8 @@ export function CommitRow({
         ) : null}
         {commit.firstLine}
       </td>
-      <td className="muted">{commit.authorName}</td>
-      <td className="muted">{commit.when}</td>
+      <td className="text-zinc-500 dark:text-zinc-400">{commit.authorName}</td>
+      <td className="text-zinc-500 dark:text-zinc-400">{commit.when}</td>
     </tr>
   );
 }

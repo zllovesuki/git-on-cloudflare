@@ -24,7 +24,7 @@ export type MergeExpanderProps = {
 function MergeStatusRow({ message }: { message: string }) {
   return (
     <tr>
-      <td colSpan={4} className="muted">
+      <td colSpan={4} className="text-zinc-500 dark:text-zinc-400">
         {message}
       </td>
     </tr>
@@ -154,7 +154,7 @@ export function MergeExpanderIsland({ owner, repo, commits }: MergeExpanderProps
           })
         ) : (
           <tr>
-            <td colSpan={4} className="muted">
+            <td colSpan={4} className="text-zinc-500 dark:text-zinc-400">
               (none)
             </td>
           </tr>

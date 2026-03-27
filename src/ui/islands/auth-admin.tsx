@@ -3,6 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { hydrateIsland } from "@/ui/client/hydrate";
+import { Button } from "@/ui/components/ui/button";
+import { Card } from "@/ui/components/ui/card";
+import { PageHeader } from "@/ui/components/ui/page-header";
 
 type AuthUser = {
   owner: string;
@@ -168,7 +171,7 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
 
   return (
     <div className="animate-slide-up">
-      <header className="page-header">
+      <PageHeader>
         <div>
           <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
             Settings
@@ -176,8 +179,8 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
           <h2 className="m-0">Auth Management</h2>
         </div>
         <div></div>
-      </header>
-      <p className="muted mb-6">
+      </PageHeader>
+      <p className="text-zinc-500 dark:text-zinc-400 mb-6">
         Use your root admin token to manage owners and tokens. Tokens are stored as SHA-256 hashes.
         You can add and delete owners and remove individual token hashes.
       </p>
@@ -185,7 +188,7 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
         {message?.text}
       </div>
       <div className="mb-6 grid gap-6 md:grid-cols-2">
-        <div className="card p-6">
+        <Card>
           <h3>1) Admin Token</h3>
           <div className="space-y-3">
             <input
@@ -201,15 +204,15 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
               }}
               className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:border-zinc-700 dark:bg-zinc-800"
             />
-            <button className="btn w-full sm:w-auto" type="button" onClick={() => void loadUsers()}>
+            <Button className="w-full sm:w-auto" type="button" onClick={() => void loadUsers()}>
               {loadingUsers ? "Loading..." : "Load Users"}
-            </button>
+            </Button>
           </div>
-          <div className="muted mt-3 text-sm">
+          <div className="text-zinc-500 dark:text-zinc-400 mt-3 text-sm">
             Your browser will remember this for the current tab.
           </div>
-        </div>
-        <div className="card p-6">
+        </Card>
+        <Card>
           <h3>2) Add Owner / Token</h3>
           <div className="space-y-3">
             <input
@@ -224,22 +227,22 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
               onChange={(event) => setToken(event.target.value)}
               className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:border-zinc-700 dark:bg-zinc-800"
             />
-            <button
-              className="btn w-full sm:w-auto"
+            <Button
+              className="w-full sm:w-auto"
               type="button"
               onClick={() => void addOwner()}
               disabled={adding}
             >
               {adding ? "Adding..." : "Add"}
-            </button>
+            </Button>
           </div>
-          <div className="muted mt-3 text-sm">
+          <div className="text-zinc-500 dark:text-zinc-400 mt-3 text-sm">
             Tip: Each collaborator uses their own token. For Git Basic auth, set username = owner
             and password = token.
           </div>
-        </div>
+        </Card>
       </div>
-      <div className="card mb-6 p-6">
+      <Card className="mb-6">
         <div className="mb-4 flex items-center justify-between">
           <h3>Owners</h3>
           <span className="rounded-full bg-zinc-200 px-3 py-1 text-sm dark:bg-zinc-700">
@@ -282,13 +285,13 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
                   </div>
                 </div>
                 <div>
-                  <button
-                    className="btn secondary"
+                  <Button
+                    variant="secondary"
                     type="button"
                     onClick={() => void deleteOwner(user.owner)}
                   >
                     Delete Owner
-                  </button>
+                  </Button>
                 </div>
               </div>
             ))}
@@ -298,7 +301,7 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
             {loadingUsers ? "Loading..." : "(none)"}
           </div>
         )}
-      </div>
+      </Card>
       <div className="rounded-2xl bg-accent-50 p-6 dark:bg-accent-900/20">
         <h3 className="mb-3 text-lg font-semibold">Usage examples</h3>
         <ul className="space-y-2 text-zinc-600 dark:text-zinc-400">

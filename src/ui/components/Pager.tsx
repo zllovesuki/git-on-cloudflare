@@ -1,3 +1,5 @@
+import { Button } from "@/ui/components/ui/button";
+
 type PagerLink = {
   text: string;
   href: string;
@@ -19,25 +21,29 @@ export function Pager({ pager }: PagerProps) {
   }
 
   return (
-    <div className="pager">
-      <div className="perpage">
-        Per page:
+    <div className="my-6 flex items-center justify-between rounded-xl bg-zinc-100 dark:bg-zinc-800/30 p-4">
+      <div className="flex items-center gap-3 text-sm">
+        <span className="py-1 text-zinc-600 dark:text-zinc-400">Per page:</span>
         {pager.perPageLinks.map((link) => (
-          <a key={link.href} href={link.href}>
+          <a
+            key={link.href}
+            href={link.href}
+            className="rounded-sm px-2 py-1 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
+          >
             {link.text}
           </a>
         ))}
       </div>
-      <div className="nav">
+      <div className="flex gap-3">
         {pager.newerHref ? (
-          <a className="btn secondary sm" href={pager.newerHref}>
+          <Button variant="secondary" size="sm" href={pager.newerHref}>
             ← Newer
-          </a>
+          </Button>
         ) : null}
         {pager.olderHref ? (
-          <a className="btn sm" href={pager.olderHref}>
+          <Button size="sm" href={pager.olderHref}>
             Older →
-          </a>
+          </Button>
         ) : null}
       </div>
     </div>

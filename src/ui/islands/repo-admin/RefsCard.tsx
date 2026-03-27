@@ -1,4 +1,6 @@
 import { RefreshCw } from "lucide-react";
+import { Button } from "@/ui/components/ui/button";
+import { Card } from "@/ui/components/ui/card";
 import { classifyRef, shortRefName } from "@/git/refDisplay.ts";
 import { shortValue } from "./format";
 
@@ -8,13 +10,13 @@ export type RefsCardProps = {
 
 export function RefsCard({ refs }: RefsCardProps) {
   return (
-    <div className="card p-6">
+    <Card>
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-xl font-semibold">References</h2>
-        <button className="btn sm" type="button" onClick={() => window.location.reload()}>
+        <Button size="sm" type="button" onClick={() => window.location.reload()}>
           <RefreshCw className="mr-2 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
           <span className="label">Refresh All</span>
-        </button>
+        </Button>
       </div>
       {refs.length ? (
         <div className="overflow-x-auto">
@@ -62,6 +64,6 @@ export function RefsCard({ refs }: RefsCardProps) {
       ) : (
         <p className="italic text-zinc-500">No references found</p>
       )}
-    </div>
+    </Card>
   );
 }

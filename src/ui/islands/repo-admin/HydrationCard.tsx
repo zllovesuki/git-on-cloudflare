@@ -1,4 +1,6 @@
 import { Check, Info, Play, Search, Trash2 } from "lucide-react";
+import { Button } from "@/ui/components/ui/button";
+import { Card } from "@/ui/components/ui/card";
 import { JsonResult } from "./JsonResult";
 import type { HydrationData } from "./types";
 
@@ -26,7 +28,7 @@ export function HydrationCard({
   hydrationResult,
 }: HydrationCardProps) {
   return (
-    <div className="card p-6">
+    <Card>
       <h2 className="mb-4 text-xl font-semibold">Pack Hydration</h2>
       <p className="mb-4 text-zinc-600 dark:text-zinc-400">
         Hydration builds thick packs used to serve fetches correctly and fast. It is required for
@@ -69,8 +71,7 @@ export function HydrationCard({
       ) : null}
       <div className="space-y-4">
         <div className="flex flex-wrap gap-3">
-          <button
-            className="btn"
+          <Button
             type="button"
             onClick={() => void startHydration(true)}
             disabled={pending["hydration-dry-run"]}
@@ -79,9 +80,8 @@ export function HydrationCard({
             <span className="label">
               {pending["hydration-dry-run"] ? "Processing..." : "Dry Run Analysis"}
             </span>
-          </button>
-          <button
-            className="btn"
+          </Button>
+          <Button
             type="button"
             onClick={() => void startHydration(false)}
             disabled={pending["hydration-start"]}
@@ -90,9 +90,9 @@ export function HydrationCard({
             <span className="label">
               {pending["hydration-start"] ? "Processing..." : "Start Hydration"}
             </span>
-          </button>
-          <button
-            className="btn secondary"
+          </Button>
+          <Button
+            variant="secondary"
             type="button"
             onClick={() => void clearHydration()}
             disabled={pending["hydration-clear"]}
@@ -101,10 +101,10 @@ export function HydrationCard({
             <span className="label">
               {pending["hydration-clear"] ? "Clearing..." : "Clear Hydration State"}
             </span>
-          </button>
+          </Button>
         </div>
         {hydrationResult ? <JsonResult data={hydrationResult} /> : null}
       </div>
-    </div>
+    </Card>
   );
 }

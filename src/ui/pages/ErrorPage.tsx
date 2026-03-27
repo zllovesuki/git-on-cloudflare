@@ -1,4 +1,5 @@
 import { TriangleAlert } from "lucide-react";
+import { Button } from "@/ui/components/ui/button";
 
 export type ErrorPageProps = {
   message?: string;
@@ -27,27 +28,25 @@ export function ErrorPage({ message, stack, owner, repo, refEnc, path }: ErrorPa
         </div>
       </div>
       {stack ? (
-        <details className="card p-4">
+        <details className="rounded-2xl border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/50 p-4">
           <summary className="cursor-pointer select-none">Stack trace</summary>
           <pre className="mt-3 overflow-auto whitespace-pre-wrap">{stack}</pre>
         </details>
       ) : null}
       <div className="flex flex-wrap gap-3">
-        <a className="btn" href="/">
-          Home
-        </a>
+        <Button href="/">Home</Button>
         {owner && repo ? (
-          <a className="btn secondary" href={`/${owner}/${repo}`}>
+          <Button variant="secondary" href={`/${owner}/${repo}`}>
             Repository
-          </a>
+          </Button>
         ) : null}
         {owner && repo && refEnc ? (
-          <a
-            className="btn secondary"
+          <Button
+            variant="secondary"
             href={`/${owner}/${repo}/tree?ref=${refEnc}${path ? `&path=${encodeURIComponent(path)}` : ""}`}
           >
             Browse
-          </a>
+          </Button>
         ) : null}
       </div>
     </div>

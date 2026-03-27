@@ -8,8 +8,8 @@
 
 @theme {
   --default-transition-duration: 75ms;
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+  --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
 
   --color-accent-50: #eef2ff;
   --color-accent-100: #e0e7ff;
@@ -24,6 +24,8 @@
 
   --animate-fade-in: fade-in 0.4s ease-out both;
   --animate-slide-up: slide-up 0.35s ease-out both;
+  --animate-scale-fade: scale-fade 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-shimmer: shimmer 1.5s ease-in-out infinite;
 }
 
 @keyframes fade-in {
@@ -48,28 +50,76 @@
   }
 }
 
+@keyframes scale-fade {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -200% 0;
+  }
+
+  to {
+    background-position: 200% 0;
+  }
+}
+
 @layer base {
   html {
     -webkit-text-size-adjust: 100%;
+  }
+
+  html,
+  body {
+    min-height: 100vh;
+  }
+
+  body {
+    @apply font-sans text-zinc-100 antialiased;
+    background-color: #09090b;
+    background-image:
+      radial-gradient(circle, rgba(255, 255, 255, 0.03) 0.5px, transparent 0.5px),
+      radial-gradient(circle, rgba(255, 255, 255, 0.02) 0.5px, transparent 0.5px),
+      radial-gradient(circle at 20% 20%, rgb(99 102 241 / 0.02), transparent 50%),
+      radial-gradient(circle at 80% 80%, rgb(99 102 241 / 0.015), transparent 50%);
+    background-size:
+      3px 3px,
+      7px 7px,
+      100% 100%,
+      100% 100%;
+  }
+
+  @media (min-width: 768px) {
+    body {
+      background-attachment: fixed;
+    }
+  }
+
+  html:not(.dark) body {
+    @apply text-zinc-900;
+    background-color: #f4f4f5;
+    background-image: none;
   }
 
   html.dark {
     color-scheme: dark;
   }
 
-  body {
-    @apply font-sans antialiased;
-    background: #f4f4f5;
-    color: #18181b;
+  html:not(.dark) {
+    color-scheme: light;
   }
 
-  html.dark body {
-    background-color: #09090b;
-    background-image:
-      radial-gradient(circle at 20% 20%, rgb(99 102 241 / 0.02), transparent 50%),
-      radial-gradient(circle at 80% 80%, rgb(99 102 241 / 0.015), transparent 50%);
-    background-attachment: fixed;
-    color: #e4e4e7;
+  ::selection {
+    background: rgb(99 102 241 / 0.28);
+    color: var(--color-accent-50);
   }
 
   *,
@@ -98,126 +148,12 @@
     @apply text-accent-600 transition-colors hover:text-accent-500 dark:text-accent-400 dark:hover:text-accent-300;
   }
 
-  button,
+  button:not(:disabled),
+  select,
+  summary,
   [role="button"] {
-    @apply cursor-pointer;
+    cursor: pointer;
   }
-}
-
-@utility btn {
-  @apply inline-flex items-center justify-center rounded-xl border border-transparent bg-accent-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors focus:outline-hidden focus:ring-2 focus:ring-accent-500 focus:ring-offset-2;
-
-  &:hover {
-    @apply bg-accent-700;
-  }
-
-  &.secondary {
-    @apply border-zinc-300 bg-white text-zinc-700 shadow-none dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200;
-  }
-
-  &.secondary:hover {
-    @apply bg-zinc-50 dark:bg-zinc-700;
-  }
-
-  &.sm {
-    @apply px-3 py-1.5 text-sm;
-  }
-}
-
-@utility alert {
-  @apply mb-4 rounded-xl p-4;
-
-  &.warn {
-    @apply bg-yellow-50 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200;
-  }
-
-  &.error {
-    @apply bg-red-50 text-red-800 dark:bg-red-900/20 dark:text-red-200;
-  }
-}
-
-@utility muted {
-  @apply text-zinc-500 dark:text-zinc-400;
-}
-
-@utility list {
-  & > div,
-  & > li {
-    @apply border-b border-zinc-100 py-2 last:border-b-0 dark:border-zinc-800;
-  }
-}
-
-@utility repo-grid {
-  @apply mt-6 grid gap-6 md:grid-cols-2;
-}
-
-@utility pager {
-  @apply my-6 flex items-center justify-between rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/30;
-
-  & .perpage {
-    @apply flex gap-3 text-sm;
-  }
-
-  & .perpage a {
-    @apply rounded-sm px-2 py-1 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700;
-  }
-
-  & .nav {
-    @apply flex gap-3;
-  }
-}
-
-@utility breadcrumb {
-  @apply mb-4 flex items-center gap-2 rounded-xl bg-zinc-50 p-3 text-sm dark:bg-zinc-800/30;
-}
-
-@utility subnav {
-  @apply inline-flex items-center gap-1 rounded-xl border border-zinc-200 bg-white p-1 dark:border-zinc-700 dark:bg-zinc-900;
-}
-
-@utility tab {
-  @apply inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-zinc-600 hover:bg-zinc-100/70 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/50 dark:text-zinc-400 dark:hover:bg-zinc-800/40 dark:hover:text-zinc-100;
-}
-
-@utility container {
-  @apply mx-auto max-w-7xl px-4 sm:px-6;
-}
-
-@utility card {
-  @apply rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800/60 dark:bg-zinc-900/50;
-}
-
-@utility page-header {
-  @apply mb-6 flex items-center justify-between;
-}
-
-@utility segmented {
-  @apply inline-flex items-center overflow-hidden rounded-full border border-zinc-300 bg-white dark:border-zinc-700 dark:bg-zinc-900;
-
-  & .seg {
-    @apply px-3 py-1.5 text-sm;
-  }
-
-  & .seg + .seg {
-    @apply border-l border-zinc-300 dark:border-zinc-700;
-  }
-
-  & .seg.label {
-    @apply bg-zinc-50 text-zinc-500 dark:bg-zinc-800/50 dark:text-zinc-400;
-  }
-
-  & .seg.action {
-    @apply no-underline hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800/50;
-  }
-}
-
-@utility no-scrollbar {
-  &::-webkit-scrollbar {
-    display: none;
-  }
-
-  -ms-overflow-style: none;
-  scrollbar-width: none;
 }
 
 @layer components {
@@ -256,10 +192,6 @@
     background: rgb(0 0 0 / 0.2);
   }
 
-  .page-header > :last-child:empty {
-    height: 2.5rem;
-  }
-
   table {
     @apply w-full border-collapse bg-white dark:bg-zinc-900/50;
   }
@@ -296,10 +228,6 @@
   html.dark .blob-container {
     background: rgb(24 24 27 / 0.5);
     border-color: rgb(39 39 42 / 0.6);
-  }
-
-  .subnav .tab[aria-current="page"] {
-    @apply bg-accent-50 font-medium text-accent-700 dark:bg-accent-900/20 dark:text-accent-300;
   }
 
   .ref-menu > summary {
@@ -477,8 +405,6 @@
     background: rgb(99 102 241 / 0.15);
   }
 
-  .btn svg,
-  .tab svg,
   svg.inline {
     vertical-align: -0.125em;
   }
@@ -506,25 +432,6 @@
 
 @layer components {
   @media (max-width: 640px) {
-    .page-header {
-      @apply flex-col items-stretch gap-3;
-    }
-
-    .page-header > :last-child:empty {
-      height: auto;
-    }
-
-    .page-header nav {
-      overflow-x: auto;
-      padding-inline: 0.25rem;
-      -ms-overflow-style: none;
-      scrollbar-width: none;
-    }
-
-    .page-header nav::-webkit-scrollbar {
-      display: none;
-    }
-
     #commits-table th:nth-child(3),
     #commits-table td:nth-child(3) {
       display: none;
@@ -814,5 +721,16 @@
   /* Empty state */
   .diff-empty {
     @apply px-5 py-6 text-center text-sm text-zinc-500 dark:text-zinc-400;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

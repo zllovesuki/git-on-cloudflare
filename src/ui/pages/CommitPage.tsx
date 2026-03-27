@@ -71,7 +71,7 @@ export function CommitPage({
       <h2>Commit {commitShort}</h2>
       <p>
         <strong>Author:</strong> {authorName} &lt;{authorEmail}&gt;{" "}
-        <span className="muted">{when}</span>
+        <span className="text-zinc-500 dark:text-zinc-400">{when}</span>
       </p>
       <p>
         <strong>Parents:</strong>{" "}
@@ -83,7 +83,7 @@ export function CommitPage({
             </span>
           ))
         ) : (
-          <span className="muted">(none)</span>
+          <span className="text-zinc-500 dark:text-zinc-400">(none)</span>
         )}
       </p>
       <p>

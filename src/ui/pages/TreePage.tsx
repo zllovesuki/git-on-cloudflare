@@ -65,7 +65,7 @@ export function TreePage({
                     />{" "}
                     <a href={entry.href}>{entry.name}</a>
                   </td>
-                  <td className="muted">{entry.shortOid}</td>
+                  <td className="text-zinc-500 dark:text-zinc-400">{entry.shortOid}</td>
                 </tr>
               ))
             ) : (
@@ -75,7 +75,7 @@ export function TreePage({
                     icon={
                       <FileIcon
                         name="folder"
-                        className="h-5 w-5 text-zinc-400 dark:text-zinc-600"
+                        className="h-5 w-5 text-zinc-500 dark:text-zinc-400"
                       />
                     }
                     title="This tree is empty"

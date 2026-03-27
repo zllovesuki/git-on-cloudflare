@@ -300,7 +300,7 @@ export function CommitDiffExpanderIsland({
 
       {/* Truncation warning */}
       {diffTruncated ? (
-        <div className="alert warn mx-4 mt-3 mb-0">
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-300 mx-4 mt-3 mb-0">
           Showing a partial diff list due to runtime limits
           {diffTruncateReason ? ` (${diffTruncateReason})` : ""}.
         </div>
@@ -349,7 +349,9 @@ export function CommitDiffExpanderIsland({
                       </div>
                     ) : null}
                     {!isLoading && error ? (
-                      <div className="alert error mb-0">Failed to load patch: {error}</div>
+                      <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-400 mb-0">
+                        Failed to load patch: {error}
+                      </div>
                     ) : null}
                     {!isLoading && !error && patch?.patch ? (
                       <DiffPatchView patch={patch.patch} filePath={entry.path} />

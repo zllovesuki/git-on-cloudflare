@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Clipboard, Download, FileText, Menu } from "lucide-react";
 
 import { hydrateIsland } from "@/ui/client/hydrate";
+import { Button, buttonClasses } from "@/ui/components/ui/button";
 
 export type BlobActionsProps = {
   viewRawHref: string;
@@ -37,26 +38,35 @@ export function BlobActionsIsland({
   return (
     <div className="flex items-center gap-2">
       <div className="hidden items-center gap-2 sm:flex">
-        <div className="segmented">
+        <div className="inline-flex items-center overflow-hidden rounded-full border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900">
           {showCopy ? (
-            <button className="seg action" type="button" onClick={() => void copyRawText()}>
+            <button
+              className="px-3 py-1.5 text-sm no-underline text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800/50"
+              type="button"
+              onClick={() => void copyRawText()}
+            >
               {copyLabel}
             </button>
           ) : null}
           {!isImage && !isPdf ? (
-            <a className="seg action" href={viewRawHref}>
+            <a
+              className="border-l border-zinc-200 dark:border-zinc-700 px-3 py-1.5 text-sm no-underline text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800/50"
+              href={viewRawHref}
+            >
               View
             </a>
           ) : null}
-          <span className="seg label">Raw</span>
+          <span className="border-l border-zinc-200 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800/50 px-3 py-1.5 text-sm text-zinc-500 dark:text-zinc-400">
+            Raw
+          </span>
         </div>
-        <a className="btn sm" href={rawHref}>
+        <Button size="sm" href={rawHref}>
           Download
-        </a>
+        </Button>
       </div>
       <div className="sm:hidden">
         <details className="ref-menu relative">
-          <summary className="btn secondary sm inline-flex items-center gap-2">
+          <summary className={buttonClasses("secondary", "sm")}>
             <Menu className="h-4 w-4" aria-hidden="true" />
           </summary>
           <div className="fixed inset-x-0 z-20 mx-3 mt-2 rounded-xl border border-zinc-200 bg-white p-2 shadow-xl dark:border-zinc-800/60 dark:bg-zinc-900">

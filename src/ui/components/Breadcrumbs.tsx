@@ -14,7 +14,10 @@ export function Breadcrumbs({ items, parentHref }: BreadcrumbsProps) {
   }
 
   return (
-    <nav className="breadcrumb" aria-label="Breadcrumbs">
+    <nav
+      className="mb-4 flex items-center gap-2 rounded-xl bg-zinc-100 dark:bg-zinc-800/30 p-3 text-sm"
+      aria-label="Breadcrumbs"
+    >
       {parentHref ? (
         <>
           <a
@@ -23,7 +26,7 @@ export function Breadcrumbs({ items, parentHref }: BreadcrumbsProps) {
           >
             ..
           </a>
-          <span className="text-zinc-400 dark:text-zinc-600">/</span>
+          <span className="text-zinc-400 dark:text-zinc-500">/</span>
         </>
       ) : null}
       {items.map((item, index) => (

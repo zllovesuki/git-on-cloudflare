@@ -1,4 +1,5 @@
 import { Trash2, TriangleAlert } from "lucide-react";
+import { Button } from "@/ui/components/ui/button";
 
 export type DangerZoneCardProps = {
   defaultBranch: string;
@@ -14,13 +15,13 @@ export function DangerZoneCard({
   purgeRepo,
 }: DangerZoneCardProps) {
   return (
-    <details className="card border-2 border-red-500 p-6 dark:border-red-600">
+    <details className="rounded-2xl border-2 border-red-500 bg-white dark:bg-zinc-900/50 p-5 sm:p-6 dark:border-red-600">
       <summary className="cursor-pointer font-bold text-red-600 dark:text-red-500">
         <TriangleAlert className="mr-2 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
         Danger Zone - Irreversible Actions
       </summary>
       <div className="mt-6 space-y-4">
-        <div className="alert error">
+        <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-400">
           <strong>Warning:</strong> These actions cannot be undone. All repository data will be
           permanently deleted.
         </div>
@@ -28,8 +29,8 @@ export function DangerZoneCard({
           This will delete all objects, packs, references, and metadata associated with this
           repository. The repository will be removed from the owner registry.
         </p>
-        <button
-          className="btn bg-red-600 text-white hover:bg-red-700"
+        <Button
+          variant="danger"
           type="button"
           onClick={() => void purgeRepo(defaultBranch)}
           disabled={pending["purge-repo"]}
@@ -38,12 +39,14 @@ export function DangerZoneCard({
           <span className="label">
             {pending["purge-repo"] ? "Deleting..." : "Permanently Delete Repository"}
           </span>
-        </button>
-        <p className="muted text-xs">
+        </Button>
+        <p className="text-zinc-500 dark:text-zinc-400 text-xs">
           Default branch: <code>{defaultBranch}</code>
         </p>
         {packList.length ? (
-          <p className="muted text-xs">Visible pack keys: {packList.length}</p>
+          <p className="text-zinc-500 dark:text-zinc-400 text-xs">
+            Visible pack keys: {packList.length}
+          </p>
         ) : null}
       </div>
     </details>

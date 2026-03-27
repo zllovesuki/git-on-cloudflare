@@ -13,7 +13,7 @@ export function AppLayout({ children, currentView }: AppLayoutProps) {
     <>
       <div className="relative z-10 min-h-screen flex flex-col">
         <Header currentView={currentView} />
-        <main className="container flex-1 py-6">{children}</main>
+        <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">{children}</main>
         <Footer />
       </div>
     </>

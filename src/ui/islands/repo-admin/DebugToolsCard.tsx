@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { Database } from "lucide-react";
+import { Button } from "@/ui/components/ui/button";
+import { Card } from "@/ui/components/ui/card";
 import { JsonResult } from "./JsonResult";
 
 export type DebugToolsCardProps = {
@@ -20,7 +22,7 @@ export function DebugToolsCard({
   const [debugOid, setDebugOid] = useState("");
 
   return (
-    <div className="card p-6">
+    <Card>
       <h2 className="mb-4 text-xl font-semibold">Debug Tools</h2>
       <div className="space-y-4">
         <div>
@@ -37,34 +39,28 @@ export function DebugToolsCard({
               value={debugOid}
               onChange={(event) => setDebugOid(event.target.value)}
             />
-            <button
-              className="btn"
+            <Button
               type="button"
               onClick={() => void checkOid(debugOid)}
               disabled={pending["check-oid"]}
             >
               {pending["check-oid"] ? "Checking..." : "Check OID"}
-            </button>
+            </Button>
           </div>
           {oidResult ? <JsonResult data={oidResult} /> : null}
         </div>
 
         <div>
           <label className="mb-2 block text-sm font-medium">Repository State Dump</label>
-          <button
-            className="btn"
-            type="button"
-            onClick={() => void dumpState()}
-            disabled={pending["dump-state"]}
-          >
+          <Button type="button" onClick={() => void dumpState()} disabled={pending["dump-state"]}>
             <Database className="mr-2 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
             <span className="label">
               {pending["dump-state"] ? "Processing..." : "View DO State"}
             </span>
-          </button>
+          </Button>
           {stateDump ? <JsonResult data={stateDump} /> : null}
         </div>
       </div>
-    </div>
+    </Card>
   );
 }

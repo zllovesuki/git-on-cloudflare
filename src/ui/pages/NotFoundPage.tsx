@@ -1,10 +1,11 @@
 import { Search } from "lucide-react";
+import { Button } from "@/ui/components/ui/button";
 
 export function NotFoundPage() {
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-16 text-center animate-slide-up">
       <span className="inline-grid h-16 w-16 place-items-center rounded-full bg-zinc-100 dark:bg-zinc-800/60">
-        <Search className="h-8 w-8 text-zinc-400 dark:text-zinc-600" aria-hidden="true" />
+        <Search className="h-8 w-8 text-zinc-500 dark:text-zinc-400" aria-hidden="true" />
       </span>
       <div>
         <span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
@@ -15,9 +16,7 @@ export function NotFoundPage() {
           The page you are looking for doesn't exist.
         </p>
       </div>
-      <a className="btn" href="/">
-        Go home
-      </a>
+      <Button href="/">Go home</Button>
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, GitBranch, Tag } from "lucide-react";
 
 import { hydrateIsland } from "@/ui/client/hydrate";
+import { buttonClasses } from "@/ui/components/ui/button";
 
 type RefItem = {
   name: string;
@@ -210,7 +211,7 @@ export function RefPickerIsland({ owner, repo, currentRef }: RefPickerProps) {
     <div ref={rootRef} className="relative">
       <details className="ref-menu relative" open={open}>
         <summary
-          className="btn secondary sm"
+          className={buttonClasses("secondary", "sm")}
           onClick={(event) => {
             event.preventDefault();
             setOpen((value) => !value);
@@ -218,7 +219,7 @@ export function RefPickerIsland({ owner, repo, currentRef }: RefPickerProps) {
         >
           <span>{formatRefLabel(currentRef)}</span>
         </summary>
-        <div className="fixed inset-x-0 z-20 mx-3 mt-2 rounded-xl border border-zinc-200 bg-white p-3 shadow-xl dark:border-zinc-800/60 dark:bg-zinc-900 sm:absolute sm:right-0 sm:left-auto sm:mx-0 sm:w-72 sm:p-2 sm:shadow-lg">
+        <div className="fixed inset-x-0 z-20 mx-3 mt-2 rounded-xl border border-zinc-200 bg-white p-3 shadow-xl dark:border-zinc-800/60 dark:bg-zinc-900 sm:absolute sm:right-0 sm:left-auto sm:mx-0 sm:w-72 sm:p-2 sm:shadow-md">
           <input
             ref={filterRef}
             type="text"
@@ -228,9 +229,13 @@ export function RefPickerIsland({ owner, repo, currentRef }: RefPickerProps) {
             className="w-full rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900"
             autoComplete="off"
           />
-          <div className="no-scrollbar mt-2 max-h-48 overflow-y-auto text-sm sm:max-h-64">
-            {loading ? <div className="muted px-2 py-2">Loading...</div> : null}
-            {!loading && error ? <div className="muted px-2 py-2">{error}</div> : null}
+          <div className="mt-2 max-h-48 overflow-y-auto text-sm sm:max-h-64 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+            {loading ? (
+              <div className="text-zinc-500 dark:text-zinc-400 px-2 py-2">Loading...</div>
+            ) : null}
+            {!loading && error ? (
+              <div className="text-zinc-500 dark:text-zinc-400 px-2 py-2">{error}</div>
+            ) : null}
             {!loading && !error ? (
               <>
                 {showCurrentChip ? (
@@ -268,7 +273,7 @@ export function RefPickerIsland({ owner, repo, currentRef }: RefPickerProps) {
                 {!showCurrentChip &&
                 !branches.some((item) => item.displayName.toLowerCase().includes(queryLower)) &&
                 !tags.some((item) => item.displayName.toLowerCase().includes(queryLower)) ? (
-                  <div className="muted px-2 py-2">No refs</div>
+                  <div className="text-zinc-500 dark:text-zinc-400 px-2 py-2">No refs</div>
                 ) : null}
               </>
             ) : null}

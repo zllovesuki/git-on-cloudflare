@@ -1,4 +1,5 @@
 import { Check, Trash2, X } from "lucide-react";
+import { Card } from "@/ui/components/ui/card";
 import { formatSampleBytes, shortValue } from "./format";
 import type { PackStat } from "./types";
 
@@ -16,17 +17,17 @@ export function PackFilesCard({ packCount, packStats, pending, removePack }: Pac
 
   if (packStats.length === 0 && packCount > 0) {
     return (
-      <div className="card p-6">
+      <Card>
         <h2 className="mb-4 text-xl font-semibold">Pack Files</h2>
         <p className="text-zinc-600 dark:text-zinc-400">
           {packCount} pack files exist but size information not loaded
         </p>
-      </div>
+      </Card>
     );
   }
 
   return (
-    <div className="card p-6">
+    <Card>
       <h2 className="mb-4 text-xl font-semibold">Pack Files ({packCount} total)</h2>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -114,6 +115,6 @@ export function PackFilesCard({ packCount, packStats, pending, removePack }: Pac
           </tbody>
         </table>
       </div>
-    </div>
+    </Card>
   );
 }

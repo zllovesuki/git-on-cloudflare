@@ -52,7 +52,7 @@ export function RepoAdminIsland(props: RepoAdminProps) {
 
   return (
     <div className="space-y-6">
-      <div className="alert warn">
+      <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-300">
         <strong>
           <TriangleAlert
             className="mr-2 inline h-4 w-4 align-[-2px] text-amber-600 dark:text-amber-400"
