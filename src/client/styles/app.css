@@ -87,25 +87,15 @@
     @apply font-sans text-zinc-100 antialiased;
     background-color: #09090b;
     background-image:
-      repeating-linear-gradient(to right, rgba(255, 255, 255, 0.02) 0 1px, transparent 1px 60px),
-      repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 0 1px, transparent 1px 60px),
-      radial-gradient(circle, rgba(255, 255, 255, 0.03) 0.5px, transparent 0.5px),
-      radial-gradient(circle, rgba(255, 255, 255, 0.02) 0.5px, transparent 0.5px),
+      url("../assets/dark-shell-texture.svg"),
       radial-gradient(circle at 20% 20%, rgb(99 102 241 / 0.02), transparent 50%),
       radial-gradient(circle at 80% 80%, rgb(99 102 241 / 0.015), transparent 50%);
-    background-size:
-      60px 60px,
-      60px 60px,
-      3px 3px,
-      7px 7px,
-      100% 100%,
-      100% 100%;
-  }
-
-  @media (min-width: 768px) {
-    body {
-      background-attachment: fixed;
-    }
+    background-repeat: repeat, no-repeat, no-repeat;
+    background-position:
+      top left,
+      center top,
+      center top;
+    background-attachment: scroll, scroll, scroll;
   }
 
   html:not(.dark) body {

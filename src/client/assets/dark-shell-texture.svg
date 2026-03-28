@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="420" viewBox="0 0 420 420" fill="none">
+  <defs>
+    <pattern id="dots-3" width="3" height="3" patternUnits="userSpaceOnUse">
+      <circle cx="0.5" cy="0.5" r="0.5" fill="white" fill-opacity="0.03" />
+    </pattern>
+    <pattern id="dots-7" width="7" height="7" patternUnits="userSpaceOnUse">
+      <circle cx="0.5" cy="0.5" r="0.5" fill="white" fill-opacity="0.02" />
+    </pattern>
+    <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
+      <path
+        d="M0 0H60M0 0V60"
+        stroke="white"
+        stroke-opacity="0.02"
+        stroke-width="1"
+        shape-rendering="crispEdges"
+      />
+    </pattern>
+  </defs>
+  <rect width="420" height="420" fill="url(#dots-3)" />
+  <rect width="420" height="420" fill="url(#dots-7)" />
+  <rect width="420" height="420" fill="url(#grid)" />
+</svg>
