@@ -335,7 +335,7 @@ export function CommitDiffExpanderIsland({
                     onClick={() => void togglePatch(entry.path)}
                   >
                     <span className="diff-toggle-icon">{isExpanded ? "▾" : "▸"}</span>
-                    {isExpanded ? "Hide" : "Diff"}
+                    {isExpanded ? "Hide patch" : "Show patch"}
                   </button>
                 </div>
 

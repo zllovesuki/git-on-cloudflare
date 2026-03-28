@@ -10,6 +10,14 @@ const INLINE_DEPS = ["isomorphic-git", "@noble/hashes", ...OPTIMIZED_DEPS];
 const isAuthSuite =
   process.env.npm_lifecycle_event === "test:auth" ||
   process.argv.some((arg) => arg.includes("auth.worker.test.ts"));
+const VITEST_POOL_COMPATIBILITY_FLAGS = [
+  "enable_nodejs_tty_module",
+  "enable_nodejs_fs_module",
+  "enable_nodejs_http_modules",
+  "enable_nodejs_perf_hooks_module",
+  "enable_nodejs_v8_module",
+  "enable_nodejs_process_v2",
+];
 
 export default defineConfig({
   plugins: [
@@ -31,6 +39,7 @@ export default defineConfig({
         cachePersist: false,
         // Silence compatibility date warnings by matching installed runtime
         compatibilityDate: "2025-09-02",
+        compatibilityFlags: VITEST_POOL_COMPATIBILITY_FLAGS,
         bindings: {
           ...BASE_TEST_BINDINGS,
           AUTH_ADMIN_TOKEN: isAuthSuite ? "admin" : "",
