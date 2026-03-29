@@ -6,6 +6,12 @@ export type PackOidsKey = `packOids:${string}`;
 
 export type Ref = { name: string; oid: string };
 export type Head = { target: string; oid?: string; unborn?: boolean };
+export type RepoStorageMode = "legacy" | "shadow-read" | "streaming";
+export type RepoLease = {
+  token: string;
+  createdAt: number;
+  expiresAt: number;
+};
 
 export type UnpackWork = {
   packKey: string;
@@ -60,6 +66,13 @@ export type HydrationWork = {
 export type RepoStateSchema = {
   refs: Ref[];
   head: Head;
+  refsVersion: number;
+  packsetVersion: number;
+  nextPackSeq: number;
+  receiveLease: RepoLease | undefined;
+  compactLease: RepoLease | undefined;
+  compactionWantedAt: number | undefined;
+  repoStorageMode: RepoStorageMode | undefined;
   lastPackKey: string;
   lastPackOids: string[];
   packList: string[];
