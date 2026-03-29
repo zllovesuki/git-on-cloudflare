@@ -1,9 +1,13 @@
 import { useState } from "react";
 import { safeReadJson } from "@/client/json.ts";
 import { isJsonObject, type JsonValue } from "@/web";
+import type { RepoStorageModeMutationResult } from "./types";
 
 export function useRepoAdminActions(owner: string, repo: string) {
-  const [hydrationResult, setHydrationResult] = useState<JsonValue | null>(null);
+  const [compactionResult, setCompactionResult] = useState<JsonValue | null>(null);
+  const [storageModeResult, setStorageModeResult] = useState<RepoStorageModeMutationResult | null>(
+    null
+  );
   const [oidResult, setOidResult] = useState<JsonValue | null>(null);
   const [stateDump, setStateDump] = useState<JsonValue | null>(null);
   const [pending, setPending] = useState<Record<string, boolean>>({});
@@ -25,31 +29,46 @@ export function useRepoAdminActions(owner: string, repo: string) {
     }
   }
 
-  async function startHydration(dryRun: boolean) {
-    await runAction(dryRun ? "hydration-dry-run" : "hydration-start", async () => {
-      const response = await fetch(`/${owner}/${repo}/admin/hydrate`, {
+  async function setStorageMode(mode: "legacy" | "shadow-read") {
+    await runAction(`storage-mode:${mode}`, async () => {
+      const response = await fetch(`/${owner}/${repo}/admin/storage-mode`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const data = (await safeReadJson(response)) as RepoStorageModeMutationResult | null;
+      setStorageModeResult(data);
+      if (response.ok) {
+        window.setTimeout(() => window.location.reload(), 1200);
+      }
+    });
+  }
+
+  async function startCompaction(dryRun: boolean) {
+    await runAction(dryRun ? "compaction-dry-run" : "compaction-start", async () => {
+      const response = await fetch(`/${owner}/${repo}/admin/compact`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dryRun }),
       });
       const data = await safeReadJson(response);
-      setHydrationResult(data);
+      setCompactionResult(data);
       if (response.ok && !dryRun) {
         window.setTimeout(() => window.location.reload(), 2000);
       }
     });
   }
 
-  async function clearHydration() {
-    if (!window.confirm("Clear all hydration state and hydration-generated packs?")) {
+  async function clearCompaction() {
+    if (!window.confirm("Clear the recorded compaction request for this repository?")) {
       return;
     }
 
-    await runAction("hydration-clear", async () => {
-      const response = await fetch(`/${owner}/${repo}/admin/hydrate`, { method: "DELETE" });
+    await runAction("compaction-clear", async () => {
+      const response = await fetch(`/${owner}/${repo}/admin/compact`, { method: "DELETE" });
       const data = await safeReadJson(response);
       if (readFlag(data, "ok")) {
-        window.alert("Hydration state cleared successfully");
+        window.alert("Compaction request cleared successfully");
         window.location.reload();
         return;
       }
@@ -59,10 +78,11 @@ export function useRepoAdminActions(owner: string, repo: string) {
   }
 
   async function removePack(packName: string) {
-    let warning = `Are you sure you want to remove pack: ${packName}?\n\nThis will delete the pack file, its index, and all associated metadata.`;
-    if (packName.includes("pack-hydr-")) {
-      warning = `WARNING: This is a hydration pack!\n\n${warning}\n\nRemoving hydration packs can impact fetch correctness. Only do this for troubleshooting and re-run hydration afterward.`;
-    }
+    const warning =
+      `Are you sure you want to remove pack: ${packName}?\n\n` +
+      `This deletes the pack file, its index, and associated metadata.\n\n` +
+      `Only superseded packs should be removed during normal operation. ` +
+      `Active packs may still be referenced until compaction replaces them.`;
     if (!window.confirm(warning)) {
       return;
     }
@@ -103,7 +123,7 @@ export function useRepoAdminActions(owner: string, repo: string) {
     });
   }
 
-  async function purgeRepo(defaultBranch: string) {
+  async function purgeRepo() {
     const confirmation = window.prompt(
       `This action will PERMANENTLY DELETE all repository data.\n\nTo confirm, type exactly: purge-${owner}/${repo}`
     );
@@ -135,12 +155,14 @@ export function useRepoAdminActions(owner: string, repo: string) {
   }
 
   return {
-    hydrationResult,
+    compactionResult,
+    storageModeResult,
     oidResult,
     stateDump,
     pending,
-    startHydration,
-    clearHydration,
+    setStorageMode,
+    startCompaction,
+    clearCompaction,
     removePack,
     checkOid,
     dumpState,

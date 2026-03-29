@@ -12,7 +12,7 @@ import { renderUiView } from "@/client/server/render";
 import { handleError } from "@/client/server/error";
 import { repoKey } from "@/keys";
 import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/cache";
-import { getUnpackProgress } from "@/common";
+import { getRepoActivity } from "@/common";
 import { badRequest } from "./helpers";
 import type { RouteRequest } from "./helpers";
 
@@ -101,7 +101,7 @@ export async function handleCommits(request: RouteRequest, env: Env, ctx: Execut
           ? `/${owner}/${repo}/commits?ref=${refEnc}&page=${page + 1}&per_page=${perPage}`
           : undefined,
     };
-    const progress = await getUnpackProgress(env, repoId);
+    const progress = await getRepoActivity(env, repoId);
     const html = await renderUiView(env, "commits", {
       title: `Commits on ${ref} · ${owner}/${repo}`,
       owner,
@@ -274,12 +274,14 @@ export async function handleCommit(request: RouteRequest, env: Env, ctx: Executi
     );
     const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
     const parents = (c.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
+    const progress = await getRepoActivity(env, repoId);
     const html = await renderUiView(env, "commit", {
       title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
       owner,
       repo,
       commitOid: c.oid,
       refEnc: encodeURIComponent(c.oid),
+      progress,
       commitShort: c.oid.slice(0, 7),
       authorName: c.author?.name || "",
       authorEmail: c.author?.email || "",

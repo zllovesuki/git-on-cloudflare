@@ -193,7 +193,17 @@ Notes:
 - `shadow-read`
 - `streaming`
 
-This is repo-local, not an env var. It is how rollout and rollback stay explicit.
+This is repo-local, not an env var. It keeps rollout state explicit while the read and receive cutovers are still in progress.
+
+Admin control surface rules:
+
+- the admin UI and admin endpoint only expose `legacy` and `shadow-read` while streaming receive is not yet implemented;
+- both `legacy` and `shadow-read` keep fetch/UI reads on the same pack-first Worker path;
+- `legacy` disables packed-vs-compatibility validation;
+- `shadow-read` enables packed-vs-compatibility validation;
+- `legacy -> shadow-read` requires at least one active pack in `pack_catalog`;
+- `shadow-read -> legacy` is the fast way to disable validation if canary noise appears;
+- mode changes are blocked while a receive lease or compaction lease is active.
 
 Lease contents:
 
@@ -784,6 +794,28 @@ Add explicit new aliases:
 - `POST /:owner/:repo/admin/compact`
 - `DELETE /:owner/:repo/admin/compact`
 
+Add a small storage-mode control endpoint:
+
+- `GET /:owner/:repo/admin/storage-mode`
+- `PUT /:owner/:repo/admin/storage-mode`
+
+`PUT` accepts only:
+
+- `legacy`
+- `shadow-read`
+
+Mode meaning during the read-path rollout:
+
+- `legacy`: packed reads remain authoritative and validation is disabled
+- `shadow-read`: the same packed reads remain authoritative and are validated against compatibility reads
+
+It must reject:
+
+- `streaming`
+- mode changes while a receive lease is active
+- mode changes while a compaction lease is active
+- `legacy -> shadow-read` when the repo still has zero active packs
+
 Do not remove the `/hydrate` routes until the admin UI has been migrated and the rollback window has closed.
 
 Current pack-deletion admin behavior must also change:
@@ -955,12 +987,14 @@ Deliverables:
 - keep those RPCs only as compatibility shims or debug-only helpers;
 - update admin/debug output to show pack-catalog state;
 - replace unpack-progress UI with repo-activity UI and migrate the admin island from hydration-derived status to compaction-derived status;
+- add an admin-only storage-mode control that reads the current mode and switches between `legacy` and `shadow-read` with lease and active-pack guardrails;
+- keep fetch/UI serving on the pack-first object store in both modes; the control only toggles validation;
 - replace loose-oriented test seeding with pack-first helpers so new tests do not silently depend on `obj:*`.
 
 Migration work:
 
 - set selected repos to `repoStorageMode = shadow-read` first;
-- once validated, flip canaries to use packed reads for fetch and UI.
+- use `shadow-read` canaries to validate packed reads before streaming receive and compaction land.
 
 Validation gate:
 

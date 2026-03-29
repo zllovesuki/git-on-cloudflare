@@ -1,6 +1,6 @@
 import type { CacheContext } from "@/cache/index.ts";
 
-import { getOidHexAt, findOidIndex, loadIdxView } from "./idxView.ts";
+import { getOidHexAt, findOidIndex, getNextOffsetByIndex, loadIdxView } from "./idxView.ts";
 import { loadActivePackCatalog } from "./catalog.ts";
 import {
   ensureMemo,
@@ -22,15 +22,15 @@ export async function findObject(
 
   for (const pack of packs) {
     packsScanned++;
-    const idx = await loadIdxView(env, pack.packKey, cacheCtx);
+    const idx = await loadIdxView(env, pack.packKey, cacheCtx, pack.packBytes);
     if (!idx) continue;
 
     const objectIndex = findOidIndex(idx, oid);
     if (objectIndex < 0) continue;
 
     const offset = idx.offsets[objectIndex];
-    const nextOffset = idx.nextOffset.get(offset);
-    if (nextOffset === undefined) continue;
+    const noff = getNextOffsetByIndex(idx, objectIndex);
+    if (noff === undefined) continue;
 
     logOnce(cacheCtx, "packed-chosen-pack-logged", () => {
       log.debug("chosen-pack", {
@@ -45,7 +45,7 @@ export async function findObject(
       idx,
       objectIndex,
       offset,
-      nextOffset,
+      nextOffset: noff,
       oid: getOidHexAt(idx, objectIndex),
     };
   }

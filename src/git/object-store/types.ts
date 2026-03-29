@@ -14,13 +14,19 @@ export type PackedObjectResult = PackedObjectLocation & {
   payload: Uint8Array;
 };
 
+export type PackedObjectReadResult = PackedObjectResult | undefined;
+
 export type IdxView = {
   packKey: string;
   count: number;
   fanout: Uint32Array;
   rawNames: Uint8Array;
-  offsets: number[];
-  offsetToIndex: Map<number, number>;
-  nextOffset: Map<number, number>;
+  offsets: Float64Array;
+  /** Start of the next pack entry for each object index; last entry points at the pack trailer. */
+  nextOffsetByIndex: Float64Array;
+  /** Pack offsets sorted ascending, paired with sortedOffsetIndices for binary search. */
+  sortedOffsets: Float64Array;
+  /** Entry indices corresponding to each element of sortedOffsets. */
+  sortedOffsetIndices: Uint32Array;
   packSize: number;
 };

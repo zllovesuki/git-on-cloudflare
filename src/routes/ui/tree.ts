@@ -8,16 +8,16 @@ import {
   bytesToText,
   getFileIconName,
   getHighlightLangsForBlobSmart,
+  type FileIconName,
 } from "@/web";
 import { renderUiView } from "@/client/server/render";
 import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/cache";
-import { getUnpackProgress } from "@/common";
+import { getRepoActivity } from "@/common";
 import { repoKey } from "@/keys";
 import { badRequest } from "./helpers";
 import type { RouteRequest } from "./helpers";
-
-type ReadPathResult = Awaited<ReturnType<typeof readPath>>;
+import type { ReadPathResult } from "@/git";
 
 export async function handleTree(request: RouteRequest, env: Env, ctx: ExecutionContext) {
   const { owner, repo } = request.params;
@@ -94,7 +94,7 @@ export async function handleTree(request: RouteRequest, env: Env, ctx: Execution
         name: string;
         href: string;
         isDir: boolean;
-        iconName: "folder" | ReturnType<typeof getFileIconName>;
+        iconName: FileIconName;
         shortOid: string;
         size: string;
       }> = [];
@@ -150,7 +150,7 @@ export async function handleTree(request: RouteRequest, env: Env, ctx: Execution
         parts.length > 0
           ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
           : null;
-      const progress = await getUnpackProgress(env, repoId);
+      const progress = await getRepoActivity(env, repoId);
       const html = await renderUiView(env, "tree", {
         title: `${path || "root"} · ${owner}/${repo}`,
         owner,
@@ -179,11 +179,13 @@ export async function handleTree(request: RouteRequest, env: Env, ctx: Execution
       // Infer language and load only what we need (use smart inference with content)
       const langs = getHighlightLangsForBlobSmart(title, text);
       const codeLang = langs[0] || null;
+      const progress = await getRepoActivity(env, repoId);
       const html = await renderUiView(env, "blob", {
         title: `${title} · ${owner}/${repo}`,
         owner,
         repo,
         refEnc: encodeURIComponent(ref),
+        progress,
         fileName: title,
         viewRawHref: `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(title)}`,
         rawHref: raw,

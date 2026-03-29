@@ -38,6 +38,12 @@ export * from "./do-retry.ts";
 export * from "./git-pack.ts";
 export * from "./packed-repo.ts";
 
+export function toRequestBody(bytes: Uint8Array): ArrayBuffer {
+  const body = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(body).set(bytes);
+  return body;
+}
+
 /**
  * Generate a per-test unique repo id suffix to avoid shared storage collisions
  * when isolatedStorage is disabled.

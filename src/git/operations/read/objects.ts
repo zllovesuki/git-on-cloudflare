@@ -1,16 +1,41 @@
 import type { CacheContext } from "@/cache/index.ts";
 import type { TreeEntry } from "./types.ts";
-import { packIndexKey } from "@/keys.ts";
-import { loadRepoStorageMode, validatePackedObjectShadowRead } from "@/git/object-store/index.ts";
-import { getPackCandidates } from "../packDiscovery.ts";
-import { getLimiter, countSubrequest } from "../limits.ts";
-import { createMemPackFs, createStubLooseLoader } from "@/git/pack/index.ts";
-import { buildObjectCacheKey, cacheOrLoadObject, cachePutObject } from "@/cache/index.ts";
-import { createLogger, createInflateStream, getRepoStub } from "@/common/index.ts";
-import * as git from "isomorphic-git";
-import { inflateAndParseHeader } from "@/git/core/index.ts";
 
-const LOADER_CAP = 400; // cap DO loose-loader calls per request in heavy mode
+import { buildObjectCacheKey, cacheOrLoadObject } from "@/cache/index.ts";
+import { createBlobFromBytes, createLogger, getRepoStub } from "@/common/index.ts";
+import {
+  loadRepoStorageMode,
+  readObject,
+  validatePackedObjectShadowRead,
+} from "@/git/object-store/index.ts";
+import { inflateAndParseHeader } from "@/git/core/index.ts";
+import { countSubrequest, getLimiter } from "../limits.ts";
+
+type LooseObjectRead = {
+  type: string;
+  payload: Uint8Array;
+};
+
+function ensureMemo(cacheCtx: CacheContext | undefined, repoId: string) {
+  if (!cacheCtx) return;
+  if (!cacheCtx.memo || (cacheCtx.memo.repoId && cacheCtx.memo.repoId !== repoId)) {
+    cacheCtx.memo = { repoId };
+    return;
+  }
+  if (!cacheCtx.memo.repoId) cacheCtx.memo.repoId = repoId;
+}
+
+function logOnce(cacheCtx: CacheContext | undefined, flag: string, fn: () => void) {
+  if (!cacheCtx) {
+    fn();
+    return;
+  }
+  cacheCtx.memo = cacheCtx.memo || {};
+  cacheCtx.memo.flags = cacheCtx.memo.flags || new Set<string>();
+  if (cacheCtx.memo.flags.has(flag)) return;
+  fn();
+  cacheCtx.memo.flags.add(flag);
+}
 
 export function parseTree(buf: Uint8Array): TreeEntry[] {
   const td = new TextDecoder();
@@ -33,6 +58,163 @@ export function parseTree(buf: Uint8Array): TreeEntry[] {
   return out;
 }
 
+async function readCompatibilityLooseObject(
+  env: Env,
+  repoId: string,
+  oid: string,
+  cacheCtx?: CacheContext
+): Promise<LooseObjectRead | undefined> {
+  ensureMemo(cacheCtx, repoId);
+  const oidLc = oid.toLowerCase();
+  const stub = getRepoStub(env, repoId);
+  const logger = createLogger(env.LOG_LEVEL, {
+    service: "readLooseObjectCompat",
+    repoId,
+    doId: stub.id.toString(),
+  });
+  const limiter = getLimiter(cacheCtx);
+
+  if (cacheCtx?.memo) {
+    const nextCalls = (cacheCtx.memo.loaderCalls ?? 0) + 1;
+    cacheCtx.memo.loaderCalls = nextCalls;
+    const cap = cacheCtx.memo.loaderCap;
+    if (typeof cap === "number" && nextCalls > cap) {
+      cacheCtx.memo.flags = cacheCtx.memo.flags || new Set<string>();
+      cacheCtx.memo.flags.add("loader-capped");
+      logOnce(cacheCtx, "compat-loader-capped-warned", () => {
+        logger.warn("compat:loader-capped", { oid: oidLc, cap });
+      });
+      return undefined;
+    }
+  }
+
+  try {
+    const zdata = await limiter.run("do:get-object-compat", async () => {
+      if (!countSubrequest(cacheCtx)) {
+        logOnce(cacheCtx, "compat-soft-budget-warned", () => {
+          logger.warn("soft-budget-exhausted", {
+            op: "do:get-object-compat",
+            oid: oidLc,
+          });
+        });
+      }
+      return await stub.getObject(oidLc);
+    });
+    if (!zdata) {
+      logger.debug("compat:loose-miss", { oid: oidLc });
+      return undefined;
+    }
+    const parsed = await inflateAndParseHeader(
+      zdata instanceof Uint8Array ? zdata : new Uint8Array(zdata)
+    );
+    if (!parsed) {
+      logger.debug("compat:loose-parse-miss", { oid: oidLc });
+      return undefined;
+    }
+    logger.debug("compat:loose-hit", { oid: oidLc, type: parsed.type });
+    return { type: parsed.type, payload: parsed.payload };
+  } catch (error) {
+    logger.debug("compat:loose-error", { oid: oidLc, error: String(error) });
+    return undefined;
+  }
+}
+
+async function maybeValidateShadowRead(
+  env: Env,
+  repoId: string,
+  oid: string,
+  cacheCtx: CacheContext | undefined,
+  legacy: LooseObjectRead | null | undefined = undefined
+): Promise<void> {
+  try {
+    const mode = await loadRepoStorageMode(env, repoId, cacheCtx);
+    if (mode !== "shadow-read") return;
+    const legacyObject =
+      legacy === undefined
+        ? await readCompatibilityLooseObject(env, repoId, oid, cacheCtx)
+        : legacy || undefined;
+    if (!legacyObject && cacheCtx?.memo?.flags?.has("loader-capped")) {
+      return;
+    }
+    await validatePackedObjectShadowRead(env, repoId, oid, legacyObject, cacheCtx);
+  } catch {
+    // Shadow validation is best-effort and must never affect correctness.
+  }
+}
+
+/**
+ * Despite the historical name, this is now the shared pack-first object reader.
+ * Loose object RPCs remain only as a compatibility fallback for repos that have
+ * not been migrated onto the active pack-catalog read path yet.
+ */
+export async function readLooseObjectRaw(
+  env: Env,
+  repoId: string,
+  oid: string,
+  cacheCtx?: CacheContext
+): Promise<{ type: string; payload: Uint8Array } | undefined> {
+  const oidLc = oid.toLowerCase();
+  ensureMemo(cacheCtx, repoId);
+
+  if (cacheCtx?.memo?.objects?.has(oidLc)) {
+    return cacheCtx.memo.objects.get(oidLc);
+  }
+
+  const logger = createLogger(env.LOG_LEVEL, {
+    service: "readObjectRaw",
+    repoId,
+  });
+  const bypassCacheRead = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
+  let compatLegacy: LooseObjectRead | null | undefined;
+
+  const loadPackedFirst = async (): Promise<LooseObjectRead | undefined> => {
+    const packed = await readObject(env, repoId, oidLc, cacheCtx);
+    if (packed) {
+      compatLegacy = undefined;
+      logger.debug("object-read", {
+        source: "pack-catalog",
+        oid: oidLc,
+        type: packed.type,
+        packKey: packed.packKey,
+      });
+      return { type: packed.type, payload: packed.payload };
+    }
+
+    const compat = await readCompatibilityLooseObject(env, repoId, oidLc, cacheCtx);
+    compatLegacy = compat || null;
+    if (compat) {
+      logger.debug("object-read", {
+        source: "compat-loose",
+        oid: oidLc,
+        type: compat.type,
+      });
+    }
+    return compat;
+  };
+
+  const storeMemoized = (value: LooseObjectRead | undefined) => {
+    if (!cacheCtx?.memo) return;
+    cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
+    cacheCtx.memo.objects.set(oidLc, value);
+  };
+
+  if (cacheCtx) {
+    const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
+    const loaded = bypassCacheRead
+      ? await loadPackedFirst()
+      : await cacheOrLoadObject(cacheKey, loadPackedFirst, cacheCtx.ctx);
+
+    storeMemoized(loaded);
+
+    await maybeValidateShadowRead(env, repoId, oidLc, cacheCtx, compatLegacy);
+    return loaded;
+  }
+
+  const loaded = await loadPackedFirst();
+  await maybeValidateShadowRead(env, repoId, oidLc, cacheCtx, compatLegacy);
+  return loaded;
+}
+
 export async function readBlob(
   env: Env,
   repoId: string,
@@ -47,382 +229,16 @@ export async function readBlob(
 export async function readBlobStream(
   env: Env,
   repoId: string,
-  oid: string
+  oid: string,
+  cacheCtx?: CacheContext
 ): Promise<Response | null> {
-  const mode = await loadRepoStorageMode(env, repoId);
-  if (mode === "shadow-read") {
-    try {
-      // Raw/blob routes still stream from the legacy object source in phase 1.
-      // Force one legacy read first so shadow mode validates the packed resolver
-      // without changing the user-visible response path yet.
-      await readLooseObjectRaw(env, repoId, oid);
-    } catch {}
-  }
-
-  const stub = getRepoStub(env, repoId);
-  const objStream = await stub.getObjectStream(oid);
-  if (!objStream) return null;
-
-  let headerParsed = false;
-  let buffer = new Uint8Array(0);
-
-  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk: Uint8Array, controller) {
-      if (!headerParsed) {
-        const combined = new Uint8Array(buffer.length + chunk.length);
-        combined.set(buffer);
-        combined.set(chunk, buffer.length);
-
-        const nullIndex = combined.indexOf(0);
-        if (nullIndex !== -1) {
-          headerParsed = true;
-          if (nullIndex + 1 < combined.length) {
-            controller.enqueue(combined.slice(nullIndex + 1));
-          }
-        } else {
-          buffer = combined;
-        }
-      } else {
-        controller.enqueue(chunk);
-      }
-    },
-  });
-
-  const decompressed = objStream
-    .pipeThrough(createInflateStream())
-    .pipeThrough({ readable, writable });
-
-  return new Response(decompressed, {
+  const obj = await readLooseObjectRaw(env, repoId, oid, cacheCtx);
+  if (!obj || obj.type !== "blob") return null;
+  return new Response(createBlobFromBytes(obj.payload).stream(), {
     headers: {
       "Content-Type": "application/octet-stream",
       "Cache-Control": "public, max-age=31536000, immutable",
-      ETag: `"${oid}"`,
+      ETag: `"${oid.toLowerCase()}"`,
     },
   });
-}
-
-export async function readLooseObjectRaw(
-  env: Env,
-  repoId: string,
-  oid: string,
-  cacheCtx?: CacheContext
-): Promise<{ type: string; payload: Uint8Array } | undefined> {
-  const oidLc = oid.toLowerCase();
-  const stub = getRepoStub(env, repoId);
-  const doId = stub.id.toString();
-  const logger = createLogger(env.LOG_LEVEL, {
-    service: "readLooseObjectRaw",
-    repoId,
-    doId,
-  });
-
-  if (cacheCtx) {
-    if (!cacheCtx.memo || (cacheCtx.memo.repoId && cacheCtx.memo.repoId !== repoId)) {
-      cacheCtx.memo = { repoId };
-    } else if (!cacheCtx.memo.repoId) {
-      cacheCtx.memo.repoId = repoId;
-    }
-  }
-
-  if (cacheCtx?.memo?.objects?.has(oidLc)) {
-    return cacheCtx.memo.objects.get(oidLc);
-  }
-
-  const heavyNoCache = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
-  const limiter = getLimiter(cacheCtx);
-  const withShadowValidation = async (value: { type: string; payload: Uint8Array } | undefined) => {
-    try {
-      await validatePackedObjectShadowRead(env, repoId, oidLc, value, cacheCtx);
-    } catch {}
-    return value;
-  };
-
-  async function addPackToFiles(
-    env: Env,
-    packKey: string,
-    files: Map<string, Uint8Array>
-  ): Promise<boolean> {
-    const [p, i] = await Promise.all([
-      limiter.run("r2:get-pack", async () => {
-        if (!countSubrequest(cacheCtx)) {
-          logger.warn("soft-budget-exhausted", { op: "r2:get-pack", key: packKey });
-          return null;
-        }
-        return await env.REPO_BUCKET.get(packKey);
-      }),
-      limiter.run("r2:get-idx", async () => {
-        if (!countSubrequest(cacheCtx)) {
-          logger.warn("soft-budget-exhausted", { op: "r2:get-idx", key: packKey });
-          return null;
-        }
-        return await env.REPO_BUCKET.get(packIndexKey(packKey));
-      }),
-    ]);
-    if (!p || !i) return false;
-
-    const [packArrayBuf, idxArrayBuf] = await Promise.all([p.arrayBuffer(), i.arrayBuffer()]);
-    const packBuf = new Uint8Array(packArrayBuf);
-    const idxBuf = new Uint8Array(idxArrayBuf);
-    const base = packKey.split("/").pop()!;
-    const idxBase = base.replace(/\.pack$/i, ".idx");
-    files.set(`/git/objects/pack/${base}`, packBuf);
-    files.set(`/git/objects/pack/${idxBase}`, idxBuf);
-    return true;
-  }
-
-  const loadFromPacks = async () => {
-    try {
-      const packListRaw = await getPackCandidates(env, stub, doId, heavyNoCache, cacheCtx);
-      let packList: string[] = packListRaw;
-      const PROBE_MAX = heavyNoCache ? 10 : packList.length;
-      if (packList.length > PROBE_MAX) packList = packList.slice(0, PROBE_MAX);
-      if (cacheCtx?.memo) {
-        cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
-        if (!cacheCtx.memo.flags.has("pack-list-candidates-logged")) {
-          logger.debug("pack-list-candidates", { count: packList.length });
-          cacheCtx.memo.flags.add("pack-list-candidates-logged");
-        }
-      } else {
-        logger.debug("pack-list-candidates", { count: packList.length });
-      }
-      if (packList.length === 0) {
-        const alreadyWarned = cacheCtx?.memo?.flags?.has("pack-list-empty");
-        if (!alreadyWarned) {
-          logger.warn("pack-list-empty", { oid: oidLc, afterFallbacks: true });
-          if (cacheCtx?.memo) {
-            cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
-            cacheCtx.memo.flags.add("pack-list-empty");
-          }
-        }
-        return undefined;
-      }
-
-      let chosenPackKey: string | undefined;
-      const contains: Record<string, boolean> = {};
-      for (const key of packList) {
-        try {
-          let set: Set<string>;
-          if (cacheCtx?.memo?.packOids?.has(key)) {
-            set = cacheCtx.memo.packOids.get(key)!;
-          } else {
-            const dataOids = await limiter.run("do:getPackOids", async () => {
-              if (!countSubrequest(cacheCtx)) {
-                logger.warn("soft-budget-exhausted", { op: "do:getPackOids", key });
-                return [] as string[];
-              }
-              return await stub.getPackOids(key);
-            });
-            set = new Set((dataOids || []).map((x: string) => x.toLowerCase()));
-            if (cacheCtx?.memo) {
-              cacheCtx.memo.packOids = cacheCtx.memo.packOids || new Map();
-              cacheCtx.memo.packOids.set(key, set);
-            }
-          }
-          const has = set.has(oidLc);
-          contains[key] = has;
-          if (!chosenPackKey && has) chosenPackKey = key;
-        } catch {}
-      }
-      if (!chosenPackKey) chosenPackKey = packList[0];
-      if (cacheCtx?.memo) {
-        cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
-        if (!cacheCtx.memo.flags.has("chosen-pack-logged")) {
-          logger.debug("chosen-pack", { chosenPackKey, hasDirectHit: !!contains[chosenPackKey] });
-          cacheCtx.memo.flags.add("chosen-pack-logged");
-        }
-      } else {
-        logger.debug("chosen-pack", { chosenPackKey, hasDirectHit: !!contains[chosenPackKey] });
-      }
-
-      const order: string[] = (() => {
-        const arr = packList.slice(0);
-        if (chosenPackKey) {
-          const i = arr.indexOf(chosenPackKey);
-          if (i > 0) {
-            arr.splice(i, 1);
-            arr.unshift(chosenPackKey);
-          } else if (i < 0) {
-            arr.unshift(chosenPackKey);
-          }
-        }
-        const LOAD_MAX = heavyNoCache ? 12 : 20;
-        if (arr.length > LOAD_MAX) arr.length = LOAD_MAX;
-        return arr;
-      })();
-
-      let files: Map<string, Uint8Array>;
-      if (cacheCtx?.memo?.packFiles) {
-        files = cacheCtx.memo.packFiles;
-      } else {
-        files = new Map<string, Uint8Array>();
-        if (cacheCtx?.memo) cacheCtx.memo.packFiles = files;
-      }
-      const loaded = new Set<string>();
-      const BATCH = 5;
-      const dir = "/git";
-      const baseLoader = createStubLooseLoader(stub);
-      const looseLoader = async (oid: string) => {
-        if (cacheCtx?.memo) {
-          const next = (cacheCtx.memo.loaderCalls ?? 0) + 1;
-          cacheCtx.memo.loaderCalls = next;
-          const cap = cacheCtx.memo.loaderCap ?? LOADER_CAP;
-          if (heavyNoCache && next > cap) {
-            cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
-            if (!cacheCtx.memo.flags.has("loader-capped")) {
-              logger.warn("read:loader-calls-capped", { cap });
-              cacheCtx.memo.flags.add("loader-capped");
-              cacheCtx.memo.flags.add("closure-timeout");
-            }
-            return undefined;
-          }
-        }
-        return await limiter.run("do:getObject", async () => {
-          countSubrequest(cacheCtx);
-          return await baseLoader(oid);
-        });
-      };
-      const fs = createMemPackFs(files, { looseLoader });
-
-      for (let idx = 0; idx < order.length; idx += BATCH) {
-        const batch = order.slice(idx, idx + BATCH).filter((k) => !loaded.has(k));
-        await Promise.all(
-          batch.map(async (key) => {
-            try {
-              const base = key.split("/").pop()!;
-              const idxBase = base.replace(/\.pack$/i, ".idx");
-              if (
-                files.has(`/git/objects/pack/${base}`) &&
-                files.has(`/git/objects/pack/${idxBase}`)
-              ) {
-                loaded.add(key);
-                return;
-              }
-              const ok = await addPackToFiles(env, key, files);
-              if (ok) loaded.add(key);
-            } catch {}
-          })
-        );
-        if (files.size === 0) continue;
-        try {
-          const result = (await git.readObject({ fs, dir, oid: oidLc, format: "content" })) as {
-            object: Uint8Array;
-            type: "blob" | "tree" | "commit" | "tag";
-          };
-          if (cacheCtx?.memo) {
-            cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
-            if (!cacheCtx.memo.flags.has("object-read-logged")) {
-              logger.debug("object-read", {
-                source: "r2-packs",
-                chosenPackKey,
-                packsLoaded: files.size,
-                type: result.type,
-              });
-              cacheCtx.memo.flags.add("object-read-logged");
-            }
-          } else {
-            logger.debug("object-read", {
-              source: "r2-packs",
-              chosenPackKey,
-              packsLoaded: files.size,
-              type: result.type,
-            });
-          }
-          if (cacheCtx?.memo) {
-            cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
-            cacheCtx.memo.objects.set(oidLc, { type: result.type, payload: result.object });
-          }
-          return { type: result.type, payload: result.object };
-        } catch (e) {
-          logger.debug("git-readObject-miss", {
-            error: String(e),
-            oid: oidLc,
-            packsTried: files.size,
-          });
-        }
-      }
-      return undefined;
-    } catch (e) {
-      logger.debug("loadFromPacks:error", { error: String(e) });
-      return undefined;
-    }
-  };
-
-  const loadFromState = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
-    try {
-      const z = await limiter.run("do:getObject", async () => {
-        if (!countSubrequest(cacheCtx)) {
-          logger.warn("soft-budget-exhausted", { op: "do:getObject", oid: oidLc });
-          return null;
-        }
-        return await stub.getObject(oidLc);
-      });
-      if (z) {
-        const parsed = await inflateAndParseHeader(z instanceof Uint8Array ? z : new Uint8Array(z));
-        if (parsed) {
-          logger.debug("object-read", { source: "do-state", type: parsed.type });
-          return { type: parsed.type, payload: parsed.payload };
-        }
-      } else {
-        logger.debug("do-state-miss", { oid: oidLc });
-      }
-    } catch (e) {
-      logger.debug("do:getObject:error", { error: String(e), oid: oidLc });
-      return undefined;
-    }
-  };
-
-  if (cacheCtx) {
-    const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
-    const bypassCacheRead = cacheCtx.memo?.flags?.has("no-cache-read") === true;
-    const doLoad = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
-      if (heavyNoCache) {
-        const res = await loadFromPacks();
-        if (res && cacheCtx?.memo) {
-          cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
-          cacheCtx.memo.objects.set(oidLc, res);
-        }
-        return res;
-      }
-
-      const stateResult = await loadFromState();
-      if (stateResult) {
-        if (cacheCtx?.memo) {
-          cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
-          cacheCtx.memo.objects.set(oidLc, stateResult);
-        }
-        return stateResult;
-      }
-
-      const res = await loadFromPacks();
-      if (res && cacheCtx?.memo) {
-        cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
-        cacheCtx.memo.objects.set(oidLc, res);
-      }
-      return res;
-    };
-
-    if (!bypassCacheRead) {
-      const loaded = await cacheOrLoadObject(cacheKey, doLoad, cacheCtx.ctx);
-      if (loaded && cacheCtx?.memo) {
-        cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
-        cacheCtx.memo.objects.set(oidLc, loaded);
-      }
-      return await withShadowValidation(loaded);
-    }
-
-    const loaded = await doLoad();
-    if (loaded && !heavyNoCache) {
-      try {
-        const savePromise = cachePutObject(cacheKey, loaded.type, loaded.payload);
-        cacheCtx.ctx?.waitUntil?.(savePromise);
-      } catch {}
-    }
-    return await withShadowValidation(loaded);
-  }
-
-  {
-    const stateResult = await loadFromState();
-    if (stateResult) return await withShadowValidation(stateResult);
-    return await withShadowValidation(await loadFromPacks());
-  }
 }

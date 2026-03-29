@@ -2,12 +2,10 @@ import type { CacheContext } from "@/cache/index.ts";
 
 /**
  * Enter the closure phase for upload-pack where we want to avoid excessive Cache API reads
- * and cap DO-backed loose loader calls. This sets flags and shared budgets in memo.
+ * and cap compatibility loose-object reads. This sets flags in memo for the
+ * duration of closure planning.
  */
-export function beginClosurePhase(
-  cacheCtx?: CacheContext,
-  opts?: { loaderCap?: number; doBatchBudget?: number }
-) {
+export function beginClosurePhase(cacheCtx?: CacheContext, opts?: { loaderCap?: number }) {
   if (!cacheCtx) return;
   cacheCtx.memo = cacheCtx.memo || {};
   cacheCtx.memo.flags = cacheCtx.memo.flags || new Set<string>();
@@ -17,10 +15,6 @@ export function beginClosurePhase(
     cacheCtx.memo.loaderCap = opts.loaderCap;
   } else if (typeof cacheCtx.memo.loaderCap !== "number") {
     cacheCtx.memo.loaderCap = 400; // conservative default during closure
-  }
-  // Initialize shared DO batch budget if not already set
-  if (typeof cacheCtx.memo.doBatchBudget !== "number") {
-    cacheCtx.memo.doBatchBudget = typeof opts?.doBatchBudget === "number" ? opts.doBatchBudget : 20;
   }
 }
 

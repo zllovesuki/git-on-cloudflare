@@ -4,7 +4,7 @@ import { isValidOwnerRepo, isValidRef, isValidPath, OID_RE, getContentTypeFromNa
 import { repoKey } from "@/keys";
 import type { RouteRequest } from "./helpers";
 
-export async function handleRaw(request: RouteRequest, env: Env) {
+export async function handleRaw(request: RouteRequest, env: Env, ctx: ExecutionContext) {
   const { owner, repo } = request.params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return new Response("Bad Request\n", { status: 400 });
@@ -17,8 +17,10 @@ export async function handleRaw(request: RouteRequest, env: Env) {
 
   if (!oid) return new Response("Missing oid\n", { status: 400 });
 
-  // Use streaming version to avoid buffering entire file in memory
-  const streamResponse = await readBlobStream(env, repoKey(owner, repo), oid);
+  // This route still avoids whole-pack buffering, but a packed blob may be
+  // materialized before the response body is streamed to the client.
+  const cacheCtx: CacheContext | undefined = ctx ? { req: request, ctx } : undefined;
+  const streamResponse = await readBlobStream(env, repoKey(owner, repo), oid, cacheCtx);
   if (!streamResponse) return new Response("Not found\n", { status: 404 });
 
   // Use text/plain for all files (like GitHub's raw view)
@@ -73,7 +75,7 @@ export async function handleRawPath(request: RouteRequest, env: Env, ctx: Execut
     const cacheCtx: CacheContext = { req: request, ctx };
     const result = await readPath(env, repoId, ref, path, cacheCtx);
     if (result.type !== "blob") return new Response("Not a blob\n", { status: 400 });
-    const streamResponse = await readBlobStream(env, repoId, result.oid);
+    const streamResponse = await readBlobStream(env, repoId, result.oid, cacheCtx);
     if (!streamResponse) return new Response("Not found\n", { status: 404 });
 
     const headers = new Headers(streamResponse.headers);

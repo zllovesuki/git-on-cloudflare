@@ -9,6 +9,7 @@ import type { RepoAdminProps } from "./types";
 import { useRepoAdminActions } from "./useRepoAdminActions";
 import { RepoOverviewCard } from "./RepoOverviewCard";
 import { HydrationCard } from "./HydrationCard";
+import { StorageModeCard } from "./StorageModeCard";
 import { PackFilesCard } from "./PackFilesCard";
 import { RefsCard } from "./RefsCard";
 import { DebugToolsCard } from "./DebugToolsCard";
@@ -24,22 +25,25 @@ export function RepoAdminIsland(props: RepoAdminProps) {
     packCount,
     packList,
     state,
+    storageModeControl,
     defaultBranch,
-    hydrationStatus,
-    hydrationStartedAt,
-    hydrationData,
-    hydrationPackCount,
+    compactionStatus,
+    compactionStartedAt,
+    compactionData,
+    supersededPackCount,
     nextMaintenanceIn,
     nextMaintenanceAt,
   } = props;
 
   const {
-    hydrationResult,
+    compactionResult,
+    storageModeResult,
     oidResult,
     stateDump,
     pending,
-    startHydration,
-    clearHydration,
+    setStorageMode,
+    startCompaction,
+    clearCompaction,
     removePack,
     checkOid,
     dumpState,
@@ -48,7 +52,6 @@ export function RepoAdminIsland(props: RepoAdminProps) {
 
   const { branchCount, tagCount } = countRefsByKind(refs);
   const packStats = Array.isArray(state.packStats) ? state.packStats : [];
-  const hydrationRunning = Boolean(hydrationData?.running);
 
   return (
     <div className="space-y-6">
@@ -66,8 +69,8 @@ export function RepoAdminIsland(props: RepoAdminProps) {
       <RepoOverviewCard
         storageSize={storageSize}
         packCount={packCount}
-        hydrationPackCount={hydrationPackCount}
-        hydrationStatus={hydrationStatus}
+        supersededPackCount={supersededPackCount}
+        compactionStatus={compactionStatus}
         nextMaintenanceIn={nextMaintenanceIn}
         nextMaintenanceAt={nextMaintenanceAt}
         state={state}
@@ -76,16 +79,22 @@ export function RepoAdminIsland(props: RepoAdminProps) {
         tagCount={tagCount}
       />
 
-      <HydrationCard
-        hydrationRunning={hydrationRunning}
-        hydrationData={hydrationData}
-        packCount={packCount}
-        hydrationStartedAt={hydrationStartedAt}
-        hydrationStatus={hydrationStatus}
+      <StorageModeCard
+        control={storageModeControl}
+        result={storageModeResult}
         pending={pending}
-        startHydration={startHydration}
-        clearHydration={clearHydration}
-        hydrationResult={hydrationResult}
+        setStorageMode={setStorageMode}
+      />
+
+      <HydrationCard
+        compactionData={compactionData}
+        compactionStartedAt={compactionStartedAt}
+        compactionStatus={compactionStatus}
+        state={state}
+        pending={pending}
+        startCompaction={startCompaction}
+        clearCompaction={clearCompaction}
+        compactionResult={compactionResult}
       />
 
       <PackFilesCard

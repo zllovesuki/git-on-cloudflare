@@ -1,7 +1,7 @@
 import type { CacheContext } from "@/cache/index.ts";
 
 import { pktLine } from "@/git/core/index.ts";
-import { createLogger, getRepoStub } from "@/common/index.ts";
+import { createLogger } from "@/common/index.ts";
 import { getPackCandidates } from "../packDiscovery.ts";
 import { getLimiter, countSubrequest } from "../limits.ts";
 import { parseFetchArgs } from "../args.ts";
@@ -47,10 +47,7 @@ export async function handleFetchV2Streaming(
     return buildAckOnlyResponse(ackOids);
   }
 
-  const stub = getRepoStub(env, repoId);
-  const doId = stub.id.toString();
-  const heavy = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
-  const packKeys = await getPackCandidates(env, stub, doId, heavy, cacheCtx);
+  const packKeys = await getPackCandidates(env, repoId, cacheCtx);
 
   if (packKeys.length === 0) {
     log.warn("stream:fetch:repository-not-ready");

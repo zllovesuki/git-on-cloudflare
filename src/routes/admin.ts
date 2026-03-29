@@ -16,6 +16,14 @@ type HeadPayload = {
   unborn?: boolean;
 };
 
+type StorageModePayload = {
+  mode: string;
+};
+
+type AdminRouteRequest = Request & {
+  params: { owner: string; repo: string; [key: string]: string };
+};
+
 function isRefPayload(value: JsonValue): value is RefPayload {
   return isJsonObject(value) && typeof value.name === "string" && typeof value.oid === "string";
 }
@@ -29,7 +37,41 @@ function isHeadPayload(value: JsonValue | null): value is HeadPayload {
   );
 }
 
+function isStorageModePayload(value: JsonValue | null): value is StorageModePayload {
+  return isJsonObject(value) && typeof value.mode === "string";
+}
+
 export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
+  async function handleCompatCompactionPost(request: AdminRouteRequest, env: Env) {
+    const { owner, repo } = request.params;
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return unauthorizedAdminBasic();
+    }
+    const body = await safeParseJsonRequest(request);
+    const dryRun = !isJsonObject(body) || body.dryRun !== false;
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    try {
+      const res = dryRun ? await stub.previewCompaction() : await stub.requestCompaction();
+      return json(res, dryRun ? 200 : 202, { "Cache-Control": "no-cache" });
+    } catch (e) {
+      return json({ error: String(e) }, 500);
+    }
+  }
+
+  async function handleCompatCompactionDelete(request: AdminRouteRequest, env: Env) {
+    const { owner, repo } = request.params;
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return unauthorizedAdminBasic();
+    }
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    try {
+      const res = await stub.clearCompactionRequest();
+      return json({ ok: true, ...res }, 200, { "Cache-Control": "no-cache" });
+    } catch (e) {
+      return json({ ok: false, error: String(e) }, 500);
+    }
+  }
+
   // Owner registry: list current repos from KV
   router.get(`/:owner/admin/registry`, async (request, env: Env) => {
     const { owner } = request.params;
@@ -40,38 +82,13 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     return json({ owner, repos });
   });
 
-  // Admin: clear hydration state and hydration-generated packs
-  router.delete(`/:owner/:repo/admin/hydrate`, async (request, env: Env) => {
-    const { owner, repo } = request.params as { owner: string; repo: string };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const res = await stub.clearHydration();
-      return json({ ok: true, ...res }, 200, { "Cache-Control": "no-cache" });
-    } catch (e) {
-      return json({ ok: false, error: String(e) }, 500);
-    }
-  });
-
-  // Admin: trigger hydration (dry-run by default)
-  // POST body: { dryRun?: boolean }
-  router.post(`/:owner/:repo/admin/hydrate`, async (request, env: Env) => {
-    const { owner, repo } = request.params as { owner: string; repo: string };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const body = await safeParseJsonRequest(request);
-    const dryRun = !isJsonObject(body) || body.dryRun !== false;
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const res = await stub.startHydration({ dryRun });
-      return json(res, dryRun ? 200 : 202, { "Cache-Control": "no-cache" });
-    } catch (e) {
-      return json({ error: String(e) }, 500);
-    }
-  });
+  // Compatibility aliases during the streaming-push rollout. The admin UI now
+  // previews or queues compaction requests, while /hydrate remains wired to the
+  // same semantics until the rollback window closes.
+  router.delete(`/:owner/:repo/admin/hydrate`, handleCompatCompactionDelete);
+  router.post(`/:owner/:repo/admin/hydrate`, handleCompatCompactionPost);
+  router.delete(`/:owner/:repo/admin/compact`, handleCompatCompactionDelete);
+  router.post(`/:owner/:repo/admin/compact`, handleCompatCompactionPost);
 
   // Owner registry: backfill/sync membership
   // POST body: { repos?: string[] } — if provided, (re)validate those; otherwise, revalidate existing KV entries
@@ -190,6 +207,39 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     }
   });
 
+  router.get(`/:owner/:repo/admin/storage-mode`, async (request, env: Env) => {
+    const { owner, repo } = request.params as { owner: string; repo: string };
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return unauthorizedAdminBasic();
+    }
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    try {
+      return json(await stub.getRepoStorageModeControl(), 200, { "Cache-Control": "no-cache" });
+    } catch (error) {
+      return json({ error: String(error) }, 500);
+    }
+  });
+
+  router.put(`/:owner/:repo/admin/storage-mode`, async (request, env: Env) => {
+    const { owner, repo } = request.params as { owner: string; repo: string };
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return unauthorizedAdminBasic();
+    }
+    const body = await safeParseJsonRequest(request);
+    if (!isStorageModePayload(body)) {
+      return new Response("Invalid storage mode payload\n", { status: 400 });
+    }
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    try {
+      const result = await stub.setRepoStorageModeGuarded(body.mode);
+      const status =
+        result.status === "ok" ? 200 : result.status === "unsupported_target_mode" ? 400 : 409;
+      return json(result, status, { "Cache-Control": "no-cache" });
+    } catch (error) {
+      return json({ error: String(error) }, 500);
+    }
+  });
+
   // Debug: check a specific commit's tree presence
   router.get(`/:owner/:repo/admin/debug-commit/:commit`, async (request, env: Env) => {
     const { owner, repo, commit } = request.params as {
@@ -252,6 +302,20 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     const stub = getRepoStub(env, repoKey(owner, repo));
     try {
       const result = await stub.removePack(packKey);
+      if (result.rejected) {
+        const error =
+          result.rejected === "active-pack"
+            ? "Active packs cannot be deleted until they are superseded"
+            : "Only superseded packs can be deleted through this endpoint";
+        return json(
+          {
+            ok: false,
+            error,
+            ...result,
+          },
+          409
+        );
+      }
       return json({ ok: result.removed, ...result });
     } catch (e) {
       return json({ ok: false, error: String(e) }, 500);

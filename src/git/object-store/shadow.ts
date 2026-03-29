@@ -1,4 +1,5 @@
 import type { CacheContext } from "@/cache/index.ts";
+import type { PackedObjectReadResult } from "./types.ts";
 import { createLogger } from "@/common/index.ts";
 import { loadRepoStorageMode } from "./catalog.ts";
 import { readObject } from "./store.ts";
@@ -21,7 +22,7 @@ export async function validatePackedObjectShadowRead(
     log.debug("shadow:validate", { oid, legacyPresent: !!legacy });
   });
 
-  let packed: Awaited<ReturnType<typeof readObject>> | undefined;
+  let packed: PackedObjectReadResult;
   try {
     packed = await readObject(env, repoId, oid, cacheCtx);
   } catch (error) {

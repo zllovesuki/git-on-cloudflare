@@ -3,13 +3,13 @@ import { Clipboard } from "lucide-react";
 import { shortRefName } from "@/git/refDisplay.ts";
 import { Card } from "@/client/components/ui/card";
 import { formatSampleBytes, shortValue } from "./format";
-import type { AdminState, PackStat } from "./types";
+import type { AdminState } from "./types";
 
 export type RepoOverviewCardProps = {
   storageSize: string;
   packCount: number;
-  hydrationPackCount: number;
-  hydrationStatus: string;
+  supersededPackCount: number;
+  compactionStatus: string;
   nextMaintenanceIn?: string;
   nextMaintenanceAt?: string;
   state: AdminState;
@@ -21,8 +21,8 @@ export type RepoOverviewCardProps = {
 export function RepoOverviewCard({
   storageSize,
   packCount,
-  hydrationPackCount,
-  hydrationStatus,
+  supersededPackCount,
+  compactionStatus,
   nextMaintenanceIn,
   nextMaintenanceAt,
   state,
@@ -31,6 +31,13 @@ export function RepoOverviewCard({
   tagCount,
 }: RepoOverviewCardProps) {
   const [copiedDoId, setCopiedDoId] = useState(false);
+  const activePackCount = Array.isArray(state.activePacks) ? state.activePacks.length : packCount;
+  const validationMode =
+    state.repoStorageMode === "shadow-read"
+      ? "shadow-read (on)"
+      : state.repoStorageMode === "streaming"
+        ? "streaming"
+        : "legacy (off)";
 
   async function copyDoId(doId: string) {
     try {
@@ -54,14 +61,12 @@ export function RepoOverviewCard({
         </div>
         <div>
           <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Packs
+            Active Packs
           </div>
           <div className="font-mono text-sm">
-            {packCount}
-            {hydrationPackCount > 0 ? (
-              <span className="ml-1 text-xs text-zinc-500">
-                ({hydrationPackCount} hydration packs)
-              </span>
+            {activePackCount}
+            {supersededPackCount > 0 ? (
+              <span className="ml-1 text-xs text-zinc-500">({supersededPackCount} superseded)</span>
             ) : null}
           </div>
         </div>
@@ -121,22 +126,30 @@ export function RepoOverviewCard({
         ) : null}
         <div>
           <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Unpacking
+            Read Validation
           </div>
-          <div className="font-mono text-sm text-amber-600 dark:text-amber-400">
-            {state.unpackWork
-              ? `${state.unpackWork.processedCount || 0}/${state.unpackWork.totalCount || 0}`
-              : state.unpackNext
-                ? "Scheduled"
-                : "Idle"}
+          <div className="font-mono text-sm">{validationMode}</div>
+        </div>
+        <div>
+          <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            Receive Lease
+          </div>
+          <div className="font-mono text-sm">{state.receiveLease ? "Active" : "Idle"}</div>
+        </div>
+        <div>
+          <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            Compaction
+          </div>
+          <div className="font-mono text-sm text-accent-600 dark:text-accent-400">
+            {compactionStatus}
           </div>
         </div>
         <div>
           <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Hydration
+            Catalog Version
           </div>
-          <div className="font-mono text-sm text-accent-600 dark:text-accent-400">
-            {hydrationStatus}
+          <div className="font-mono text-sm">
+            {typeof state.packCatalogVersion === "number" ? state.packCatalogVersion : "n/a"}
           </div>
         </div>
         <div>

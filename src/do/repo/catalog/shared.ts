@@ -7,6 +7,7 @@ import type {
 } from "../repoState.ts";
 import type { PackCatalogRow } from "../db/schema.ts";
 import type { Ref } from "../repoState.ts";
+import type { GuardedRepoStorageMode } from "@/contracts/repoStorageMode.ts";
 
 export const RECEIVE_LEASE_TTL_MS = 30 * 60_000;
 export const COMPACT_LEASE_TTL_MS = 20 * 60_000;
@@ -48,6 +49,8 @@ export function uniq(items: Array<string | undefined>): string[] {
   }
   return out;
 }
+
+export const GUARDED_REPO_STORAGE_MODES: GuardedRepoStorageMode[] = ["legacy", "shadow-read"];
 
 export async function ensureRepoMetadataDefaults(
   store: TypedStorage<RepoStateSchema>

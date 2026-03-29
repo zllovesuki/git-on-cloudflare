@@ -1,10 +1,14 @@
-import type { RepoStateSchema, Head, RepoStorageMode } from "./repoState.ts";
-import type { UnpackProgress } from "@/common/index.ts";
+import type { Head, RepoStateSchema, RepoStorageMode, TypedStorage } from "./repoState.ts";
+import type { RepoActivity, UnpackProgress } from "@/common/index.ts";
 import type { PackCatalogRow } from "./db/schema.ts";
+import type {
+  RepoStorageModeControl,
+  RepoStorageModeMutationResult,
+} from "@/contracts/repoStorageMode.ts";
 
 import { DurableObject } from "cloudflare:workers";
 import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
-import { asTypedStorage, objKey } from "./repoState.ts";
+import { asTypedStorage } from "./repoState.ts";
 import { doPrefix } from "@/keys.ts";
 import { text, createLogger, isValidOid } from "@/common/index.ts";
 import {
@@ -12,7 +16,6 @@ import {
   summarizeHydrationPlan,
   clearHydrationState,
 } from "./hydration/index.ts";
-import { ensureScheduled } from "./scheduler.ts";
 import { purgeRepo, removePack } from "./packOperations.ts";
 import {
   getObjectStream,
@@ -32,13 +35,23 @@ import {
   beginReceiveLease,
   clearExpiredLeases,
   getActivePackCatalogSnapshot,
+  getRepoActivitySnapshot,
+  getRepoStorageModeControl,
   getRepoStorageModeValue,
+  setRepoStorageModeGuarded,
   setRepoStorageModeValue,
 } from "./catalog.ts";
 import { getRefs, setRefs, resolveHead, setHead, getHeadAndRefs } from "./refs.ts";
 import { handleUnpackWork, getUnpackProgress } from "./unpack.ts";
 import { handleIdleAndMaintenance } from "./maintenance.ts";
-import { debugState, debugCheckCommit, debugCheckOid } from "./debug.ts";
+import {
+  debugState,
+  debugCheckCommit,
+  debugCheckOid,
+  type DebugCommitCheck,
+  type DebugOidCheck,
+  type DebugStateSnapshot,
+} from "./debug.ts";
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 import { getDb } from "./db/index.ts";
 import { migrateKvToSql } from "./db/migrate.ts";
@@ -48,6 +61,11 @@ import {
   touchAndMaybeSchedule,
   type RepoDOAccessContext,
 } from "./repoDO/access.ts";
+import {
+  clearCompactionRequestState,
+  previewCompactionState,
+  requestCompactionState,
+} from "./repoDO/compaction.ts";
 import { handleReceiveRequest } from "./repoDO/receive.ts";
 import { handleHydrationAlarmWork } from "./repoDO/hydration.ts";
 import { seedMinimalRepoState } from "./repoDO/seeding.ts";
@@ -56,38 +74,35 @@ import { seedMinimalRepoState } from "./repoDO/seeding.ts";
  * Repository Durable Object (per-repo authority)
  *
  * Responsibilities
- * - Acts as the strongly consistent source of truth for a single repository
- * - Stores refs and HEAD in DO storage
- * - Caches loose objects (zlib-compressed) in DO storage
- * - Mirrors loose objects to R2 under `do/<id>/objects/loose/<oid>` for cheap reads
- * - Writes received packfiles to R2 under `do/<id>/objects/pack/*.pack` (and .idx)
+ * - Acts as the strongly consistent source of truth for repository metadata
+ * - Stores refs, HEAD, rollout mode, and pack catalog state in DO storage/SQLite
+ * - Keeps loose-object state only for compatibility and rollback helpers during rollout
+ * - Writes received packfiles to R2 under `do/<id>/objects/pack/*.pack` (and `.idx`)
  * - Exposes focused internal HTTP endpoints:
- *   - `POST /receive` — receive-pack implementation (delegates to git/operations/receive.ts)
+ *   - `POST /receive` — current receive-pack implementation (delegates to git/operations/receive.ts)
  * - All other operations are provided as typed RPC methods on the class.
  *
  * Read Path (RPC)
- * - Loose object reads are exposed via RPC methods such as `getObjectStream()` and `getObject()`.
- * - Reads prefer R2 (range-friendly and cheap) and fall back to DO storage if missing.
- * - There is no public HTTP endpoint for object reads; this reduces the attack surface and
- *   keeps all internal state access typed and testable.
+ * - Correctness reads now live in worker-local pack-first helpers under `src/git/object-store/`.
+ * - Legacy object RPCs remain available as compatibility, rollback, and admin/debug helpers.
+ * - There is no public HTTP endpoint for object reads; this keeps internal state access typed and
+ *   easy to audit.
  *
  * Write Path
  * - Loose object writes: DO storage first, then mirror to R2 via `r2LooseKey()`.
- * - Pushes: `POST /receive` stores the raw `.pack` to R2 (under the DO prefix) and performs a
- *   fast index-only step to produce `.idx`. It then queues asynchronous unpack work which runs in
- *   small time-budgeted chunks under the DO `alarm()` (mirrors loose objects to R2 as it goes).
- *   Pack metadata is maintained to enable efficient fetch assembly.
+ * - The current `POST /receive` path still buffers the request body, stores the raw `.pack` to R2,
+ *   performs a fast index-only step to produce `.idx`, and then queues asynchronous unpack work.
+ *   That legacy compatibility path remains in place until the streaming receive cutover lands.
  *
  * Maintenance & Background Work
  * - `alarm()` combines three duties:
- *   1) Unpack work: Process pending pack objects in time-limited chunks to avoid long blocking.
+ *   1) Unpack work: Process pending legacy pack objects in time-limited chunks.
  *   2) Idle cleanup: If a repo looks empty and idle long enough, purge DO storage and its R2 prefix.
  *   3) Pack maintenance: Periodically prune old pack files in R2 and their metadata in DO.
  * - Listing/sweeping uses helpers from `keys.ts` to avoid path mismatches.
  */
 export class RepoDurableObject extends DurableObject {
   declare env: Env;
-  // Throttle lastAccessMs writes to storage to reduce per-request write amplification
   private lastAccessMemMs: number | undefined;
   private db: DrizzleSqliteDODatabase<any> | undefined;
 
@@ -102,21 +117,13 @@ export class RepoDurableObject extends DurableObject {
     });
   }
 
-  // Thin request router: delegates to focused handlers below.
-  // Keep this mapping explicit and small so behavior is easy to audit.
   async fetch(request: Request): Promise<Response> {
-    // Touch access and (re)schedule an idle cleanup alarm
     try {
-      await touchAndMaybeSchedule(this.accessContext());
+      await this.touchAndMaybeSchedule();
     } catch {}
     const url = new URL(request.url);
     this.logger.debug("fetch", { path: url.pathname, method: request.method });
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
 
-    // Receive-pack: parse update commands section and packfile, store pack to R2,
-    // update refs atomically if valid, and respond with report-status. This remains
-    // on HTTP (instead of RPC) to preserve streaming semantics end-to-end without
-    // buffering the pack in memory.
     if (url.pathname === "/receive" && request.method === "POST") {
       return this.handleReceive(request);
     }
@@ -124,30 +131,21 @@ export class RepoDurableObject extends DurableObject {
     return text("Not found\n", 404);
   }
 
-  // --- Alarm-based tasks ---
-  // Combines three responsibilities:
-  // 1) Unpack work: Process pending pack objects in chunks to avoid blocking
-  // 2) Idle cleanup: If the DO remains idle beyond IDLE_MS and appears empty/unused, purge storage and R2 mirror.
-  // 3) Maintenance: Periodically prune stale packs and metadata even for active repos.
   async alarm(): Promise<void> {
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     this.logger.debug("alarm:start", {});
 
     await clearExpiredLeases(this.ctx, this.logger);
 
-    // Priority 1: Handle pending unpack work
     if (await handleUnpackWork(this.ctx, this.env, this.prefix(), this.logger)) {
-      return; // Exit early to let unpack continue
+      return;
     }
 
-    // Priority 2: Hydration work (resumable, time-sliced)
     if (await this.handleHydrationWork(store)) {
-      return; // Exit early; hydration requested another slice soon
+      return;
     }
 
-    // Priority 3: Check for idle cleanup or maintenance needs
     await handleIdleAndMaintenance(this.ctx, this.env, this.logger);
-
     this.logger.debug("alarm:end", {});
   }
 
@@ -155,11 +153,6 @@ export class RepoDurableObject extends DurableObject {
     await touchAndMaybeSchedule(this.accessContext());
   }
 
-  /**
-   * Safe wrapper around touchAndMaybeSchedule() for RPC and internal entrypoints.
-   * Ensures last access time is updated and an alarm is scheduled without
-   * forcing every method to duplicate try/catch.
-   */
   private async ensureAccessAndAlarm(): Promise<void> {
     await ensureAccessAndAlarm(this.accessContext());
   }
@@ -251,9 +244,30 @@ export class RepoDurableObject extends DurableObject {
     return await getRepoStorageModeValue(this.ctx);
   }
 
+  public async getRepoStorageModeControl(): Promise<RepoStorageModeControl> {
+    await this.ensureAccessAndAlarm();
+    return await getRepoStorageModeControl(this.ctx, this.env, this.prefix(), this.logger);
+  }
+
+  public async getRepoActivity(): Promise<RepoActivity | null> {
+    await this.ensureAccessAndAlarm();
+    const snapshot = await getRepoActivitySnapshot(this.ctx);
+    if (snapshot.state === "idle") return null;
+    return {
+      state: snapshot.state,
+      startedAt: snapshot.lease.createdAt,
+      expiresAt: snapshot.lease.expiresAt,
+    };
+  }
+
   public async setRepoStorageMode(mode: RepoStorageMode): Promise<RepoStorageMode> {
     await this.ensureAccessAndAlarm();
     return await setRepoStorageModeValue(this.ctx, mode, this.logger);
+  }
+
+  public async setRepoStorageModeGuarded(mode: string): Promise<RepoStorageModeMutationResult> {
+    await this.ensureAccessAndAlarm();
+    return await setRepoStorageModeGuarded(this.ctx, this.env, this.prefix(), mode, this.logger);
   }
 
   public async beginReceive() {
@@ -281,17 +295,63 @@ export class RepoDurableObject extends DurableObject {
     return await getUnpackProgress(this.ctx);
   }
 
-  public async debugState(): Promise<ReturnType<typeof debugState>> {
+  public async previewCompaction(): Promise<{
+    action: "preview";
+    message: string;
+    queued: boolean;
+    wantedAt?: number;
+    activeCatalog: PackCatalogRow[];
+    packCatalogVersion: number;
+  }> {
+    await this.ensureAccessAndAlarm();
+    return await previewCompactionState({
+      ctx: this.ctx,
+      env: this.env,
+      prefix: this.prefix(),
+      logger: this.logger,
+    });
+  }
+
+  public async requestCompaction(): Promise<{
+    action: "queued";
+    message: string;
+    queued: true;
+    wantedAt: number;
+    activeCatalog: PackCatalogRow[];
+    packCatalogVersion: number;
+  }> {
+    await this.ensureAccessAndAlarm();
+    return await requestCompactionState({
+      ctx: this.ctx,
+      env: this.env,
+      prefix: this.prefix(),
+      logger: this.logger,
+    });
+  }
+
+  public async clearCompactionRequest(): Promise<{
+    action: "cleared";
+    cleared: boolean;
+    message: string;
+  }> {
+    await this.ensureAccessAndAlarm();
+    return await clearCompactionRequestState({
+      ctx: this.ctx,
+      logger: this.logger,
+    });
+  }
+
+  public async debugState(): Promise<DebugStateSnapshot> {
     await this.ensureAccessAndAlarm();
     return await debugState(this.ctx, this.env);
   }
 
-  public async debugCheckCommit(commit: string): Promise<ReturnType<typeof debugCheckCommit>> {
+  public async debugCheckCommit(commit: string): Promise<DebugCommitCheck> {
     await this.ensureAccessAndAlarm();
     return await debugCheckCommit(this.ctx, this.env, commit);
   }
 
-  public async debugCheckOid(oid: string): Promise<ReturnType<typeof debugCheckOid>> {
+  public async debugCheckOid(oid: string): Promise<DebugOidCheck> {
     await this.ensureAccessAndAlarm();
     return await debugCheckOid(this.ctx, this.env, oid);
   }
@@ -317,7 +377,6 @@ export class RepoDurableObject extends DurableObject {
   }
 
   private prefix() {
-    // Tests and R2 layout expect Durable Object data under the 'do/<id>' prefix
     return doPrefix(this.ctx.id.toString());
   }
 
@@ -328,9 +387,7 @@ export class RepoDurableObject extends DurableObject {
     });
   }
 
-  private async handleHydrationWork(
-    store: ReturnType<typeof asTypedStorage<RepoStateSchema>>
-  ): Promise<boolean> {
+  private async handleHydrationWork(store: TypedStorage<RepoStateSchema>): Promise<boolean> {
     return await handleHydrationAlarmWork({
       ctx: this.ctx,
       env: this.env,
@@ -348,7 +405,7 @@ export class RepoDurableObject extends DurableObject {
     queueLength?: number;
   }> {
     await this.ensureAccessAndAlarm();
-    const dry = options?.dryRun !== false; // default to dry-run when undefined
+    const dry = options?.dryRun !== false;
     if (dry) {
       const plan = await summarizeHydrationPlan(this.ctx, this.env, this.prefix());
       return { queued: false, dryRun: true, plan };
@@ -363,17 +420,9 @@ export class RepoDurableObject extends DurableObject {
     removedPacks: number;
   }> {
     await this.ensureAccessAndAlarm();
-    // Delegate to hydration helper
-    const res = await clearHydrationState(this.ctx, this.env);
-    return res;
+    return await clearHydrationState(this.ctx, this.env);
   }
 
-  /**
-   * RPC: Seed a minimal repository with an empty tree and a single commit pointing to it.
-   * Used by tests to initialize a valid repo state without using HTTP fetch routes.
-   *
-   * @param withPack - If true, creates a pack file instead of loose objects (default: true for streaming compatibility)
-   */
   public async seedMinimalRepo(
     withPack: boolean = true
   ): Promise<{ commitOid: string; treeOid: string }> {
@@ -386,10 +435,6 @@ export class RepoDurableObject extends DurableObject {
     });
   }
 
-  /**
-   * RPC: Store a loose object (zlib-compressed with Git header) by its OID.
-   * Mirrors to R2 best-effort. Throws on invalid OID.
-   */
   public async putLooseObject(oid: string, zdata: Uint8Array): Promise<void> {
     await this.ensureAccessAndAlarm();
     if (!isValidOid(oid)) throw new Error("Bad oid");
@@ -401,24 +446,18 @@ export class RepoDurableObject extends DurableObject {
     return await getObjectSize(this.ctx, this.env, this.prefix(), oid);
   }
 
-  /**
-   * RPC: DANGEROUS - Completely purge this repository.
-   * Deletes all R2 objects and all DO storage.
-   */
   public async purgeRepo(): Promise<{ deletedR2: number; deletedDO: boolean }> {
     await this.ensureAccessAndAlarm();
     return await purgeRepo(this.ctx, this.env);
   }
 
-  /**
-   * RPC: Remove a specific pack file and its associated data
-   * @param packKey - The pack key to remove
-   */
   public async removePack(packKey: string): Promise<{
     removed: boolean;
     deletedPack: boolean;
     deletedIndex: boolean;
     deletedMetadata: boolean;
+    rejected?: "active-pack" | "non-superseded-pack";
+    packState?: "active" | "superseded" | "unknown";
   }> {
     await this.ensureAccessAndAlarm();
     return await removePack(this.ctx, this.env, packKey);
