@@ -1,0 +1,270 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "8b492774-a545-4435-ae8c-40f50b3fb100",
+  "prevId": "c7b5c1b0-16ab-416f-a683-292a825c4a32",
+  "tables": {
+    "hydr_cover": {
+      "name": "hydr_cover",
+      "columns": {
+        "work_id": {
+          "name": "work_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "oid": {
+          "name": "oid",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_hydr_cover_oid": {
+          "name": "idx_hydr_cover_oid",
+          "columns": ["oid"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "hydr_cover_pk": {
+          "columns": ["work_id", "oid"],
+          "name": "hydr_cover_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "hydr_pending": {
+      "name": "hydr_pending",
+      "columns": {
+        "work_id": {
+          "name": "work_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "oid": {
+          "name": "oid",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_hydr_pending_work_kind": {
+          "name": "idx_hydr_pending_work_kind",
+          "columns": ["work_id", "kind"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "hydr_pending_pk": {
+          "columns": ["work_id", "kind", "oid"],
+          "name": "hydr_pending_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "chk_hydr_pending_kind": {
+          "name": "chk_hydr_pending_kind",
+          "value": "\"kind\" IN ('base','loose')"
+        }
+      }
+    },
+    "pack_catalog": {
+      "name": "pack_catalog",
+      "columns": {
+        "pack_key": {
+          "name": "pack_key",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "tier": {
+          "name": "tier",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "seq_lo": {
+          "name": "seq_lo",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "seq_hi": {
+          "name": "seq_hi",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "object_count": {
+          "name": "object_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "pack_bytes": {
+          "name": "pack_bytes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "idx_bytes": {
+          "name": "idx_bytes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "superseded_by": {
+          "name": "superseded_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_pack_catalog_state_seqhi": {
+          "name": "idx_pack_catalog_state_seqhi",
+          "columns": ["state", "\"seq_hi\" desc"],
+          "isUnique": false
+        },
+        "idx_pack_catalog_state_tier_seqlo": {
+          "name": "idx_pack_catalog_state_tier_seqlo",
+          "columns": ["state", "tier", "seq_lo"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "chk_pack_catalog_kind": {
+          "name": "chk_pack_catalog_kind",
+          "value": "\"kind\" IN ('receive','compact','legacy')"
+        },
+        "chk_pack_catalog_state": {
+          "name": "chk_pack_catalog_state",
+          "value": "\"state\" IN ('active','superseded')"
+        },
+        "chk_pack_catalog_tier": {
+          "name": "chk_pack_catalog_tier",
+          "value": "\"tier\" >= 0"
+        },
+        "chk_pack_catalog_seq": {
+          "name": "chk_pack_catalog_seq",
+          "value": "\"seq_lo\" <= \"seq_hi\""
+        },
+        "chk_pack_catalog_object_count": {
+          "name": "chk_pack_catalog_object_count",
+          "value": "\"object_count\" >= 0"
+        },
+        "chk_pack_catalog_pack_bytes": {
+          "name": "chk_pack_catalog_pack_bytes",
+          "value": "\"pack_bytes\" >= 0"
+        },
+        "chk_pack_catalog_idx_bytes": {
+          "name": "chk_pack_catalog_idx_bytes",
+          "value": "\"idx_bytes\" >= 0"
+        }
+      }
+    },
+    "pack_objects": {
+      "name": "pack_objects",
+      "columns": {
+        "pack_key": {
+          "name": "pack_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "oid": {
+          "name": "oid",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_pack_objects_oid": {
+          "name": "idx_pack_objects_oid",
+          "columns": ["oid"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "pack_objects_pk": {
+          "columns": ["pack_key", "oid"],
+          "name": "pack_objects_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {
+      "idx_pack_catalog_state_seqhi": {
+        "columns": {
+          "\"seq_hi\" desc": {
+            "isExpression": true
+          }
+        }
+      }
+    }
+  }
+}

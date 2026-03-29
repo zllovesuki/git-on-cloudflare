@@ -1,35 +1,18 @@
-import type { RepoStateSchema, Head } from "./repoState.ts";
+import type { RepoStateSchema, Head, RepoStorageMode } from "./repoState.ts";
 import type { UnpackProgress } from "@/common/index.ts";
+import type { PackCatalogRow } from "./db/schema.ts";
 
 import { DurableObject } from "cloudflare:workers";
 import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import { asTypedStorage, objKey } from "./repoState.ts";
 import { doPrefix } from "@/keys.ts";
-import {
-  encodeGitObjectAndDeflate,
-  receivePack,
-  buildPackV2,
-  parseGitObject,
-  indexPackOnly,
-  inflateAndParseHeader,
-} from "@/git/index.ts";
-import {
-  text,
-  createLogger,
-  isValidOid,
-  bytesToHex,
-  createInflateStream,
-  createBlobFromBytes,
-} from "@/common/index.ts";
-import { r2PackKey } from "@/keys.ts";
+import { text, createLogger, isValidOid } from "@/common/index.ts";
 import {
   enqueueHydrationTask,
-  processHydrationSlice,
   summarizeHydrationPlan,
   clearHydrationState,
 } from "./hydration/index.ts";
-import { ensureScheduled, scheduleAlarmIfSooner } from "./scheduler.ts";
-import { getConfig } from "./repoConfig.ts";
+import { ensureScheduled } from "./scheduler.ts";
 import { purgeRepo, removePack } from "./packOperations.ts";
 import {
   getObjectStream,
@@ -42,14 +25,32 @@ import {
   getObjectRefsBatch,
 } from "./storage.ts";
 import { getPackLatest, getPacks, getPackOids, getPackOidsBatch } from "./packs.ts";
+import {
+  abortCompactionLease,
+  abortReceiveLease,
+  beginCompactionLease,
+  beginReceiveLease,
+  clearExpiredLeases,
+  getActivePackCatalogSnapshot,
+  getRepoStorageModeValue,
+  setRepoStorageModeValue,
+} from "./catalog.ts";
 import { getRefs, setRefs, resolveHead, setHead, getHeadAndRefs } from "./refs.ts";
 import { handleUnpackWork, getUnpackProgress } from "./unpack.ts";
 import { handleIdleAndMaintenance } from "./maintenance.ts";
 import { debugState, debugCheckCommit, debugCheckOid } from "./debug.ts";
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
-import { getDb, insertPackOids } from "./db/index.ts";
+import { getDb } from "./db/index.ts";
 import { migrateKvToSql } from "./db/migrate.ts";
 import migrations from "@/drizzle/migrations";
+import {
+  ensureAccessAndAlarm,
+  touchAndMaybeSchedule,
+  type RepoDOAccessContext,
+} from "./repoDO/access.ts";
+import { handleReceiveRequest } from "./repoDO/receive.ts";
+import { handleHydrationAlarmWork } from "./repoDO/hydration.ts";
+import { seedMinimalRepoState } from "./repoDO/seeding.ts";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -106,7 +107,7 @@ export class RepoDurableObject extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     // Touch access and (re)schedule an idle cleanup alarm
     try {
-      await this.touchAndMaybeSchedule();
+      await touchAndMaybeSchedule(this.accessContext());
     } catch {}
     const url = new URL(request.url);
     this.logger.debug("fetch", { path: url.pathname, method: request.method });
@@ -132,6 +133,8 @@ export class RepoDurableObject extends DurableObject {
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     this.logger.debug("alarm:start", {});
 
+    await clearExpiredLeases(this.ctx, this.logger);
+
     // Priority 1: Handle pending unpack work
     if (await handleUnpackWork(this.ctx, this.env, this.prefix(), this.logger)) {
       return; // Exit early to let unpack continue
@@ -149,19 +152,7 @@ export class RepoDurableObject extends DurableObject {
   }
 
   private async touchAndMaybeSchedule(): Promise<void> {
-    const cfg = getConfig(this.env);
-    const now = Date.now();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-
-    // Update last access time with throttling (max once per 60s)
-    try {
-      if (!this.lastAccessMemMs || now - this.lastAccessMemMs >= 60_000) {
-        await store.put("lastAccessMs", now);
-        this.lastAccessMemMs = now;
-      }
-    } catch {}
-
-    await ensureScheduled(this.ctx, this.env, now);
+    await touchAndMaybeSchedule(this.accessContext());
   }
 
   /**
@@ -170,13 +161,19 @@ export class RepoDurableObject extends DurableObject {
    * forcing every method to duplicate try/catch.
    */
   private async ensureAccessAndAlarm(): Promise<void> {
-    try {
-      await this.touchAndMaybeSchedule();
-    } catch (e) {
-      try {
-        this.logger.warn("touch:schedule:failed", { error: String(e) });
-      } catch {}
-    }
+    await ensureAccessAndAlarm(this.accessContext());
+  }
+
+  private accessContext(): RepoDOAccessContext {
+    return {
+      ctx: this.ctx,
+      env: this.env,
+      logger: this.logger,
+      getLastAccessMemMs: () => this.lastAccessMemMs,
+      setLastAccessMemMs: (value) => {
+        this.lastAccessMemMs = value;
+      },
+    };
   }
 
   public async listRefs(): Promise<{ name: string; oid: string }[]> {
@@ -244,6 +241,41 @@ export class RepoDurableObject extends DurableObject {
     return await getPackOidsBatch(this.ctx, keys, this.logger);
   }
 
+  public async getActivePackCatalog(): Promise<PackCatalogRow[]> {
+    await this.ensureAccessAndAlarm();
+    return await getActivePackCatalogSnapshot(this.ctx, this.env, this.prefix(), this.logger);
+  }
+
+  public async getRepoStorageMode(): Promise<RepoStorageMode> {
+    await this.ensureAccessAndAlarm();
+    return await getRepoStorageModeValue(this.ctx);
+  }
+
+  public async setRepoStorageMode(mode: RepoStorageMode): Promise<RepoStorageMode> {
+    await this.ensureAccessAndAlarm();
+    return await setRepoStorageModeValue(this.ctx, mode, this.logger);
+  }
+
+  public async beginReceive() {
+    await this.ensureAccessAndAlarm();
+    return await beginReceiveLease(this.ctx, this.env, this.prefix(), this.logger);
+  }
+
+  public async abortReceive(token: string): Promise<boolean> {
+    await this.ensureAccessAndAlarm();
+    return await abortReceiveLease(this.ctx, token);
+  }
+
+  public async beginCompaction() {
+    await this.ensureAccessAndAlarm();
+    return await beginCompactionLease(this.ctx, this.env, this.prefix(), this.logger);
+  }
+
+  public async abortCompaction(token: string): Promise<boolean> {
+    await this.ensureAccessAndAlarm();
+    return await abortCompactionLease(this.ctx, token);
+  }
+
   public async getUnpackProgress(): Promise<UnpackProgress> {
     await this.ensureAccessAndAlarm();
     return await getUnpackProgress(this.ctx);
@@ -275,27 +307,13 @@ export class RepoDurableObject extends DurableObject {
   }
 
   private async handleReceive(request: Request) {
-    // Delegate to extracted implementation for clarity and testability.
-    this.logger.info("receive:start", {});
-    // Pre-body guard: block when current unpack is running and a next pack is already queued
-    try {
-      const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-      const work = await store.get("unpackWork");
-      const next = await store.get("unpackNext");
-      if (work && next) {
-        this.logger.warn("receive:block-busy", { retryAfter: 10 });
-        return new Response("Repository is busy unpacking; please retry shortly.\n", {
-          status: 503,
-          headers: {
-            "Retry-After": "10",
-            "Content-Type": "text/plain; charset=utf-8",
-          },
-        });
-      }
-    } catch {}
-    const res = await receivePack(this.ctx, this.env, this.prefix(), request);
-    this.logger.info("receive:end", { status: res.status });
-    return res;
+    return await handleReceiveRequest({
+      ctx: this.ctx,
+      env: this.env,
+      prefix: this.prefix(),
+      request,
+      logger: this.logger,
+    });
   }
 
   private prefix() {
@@ -313,19 +331,13 @@ export class RepoDurableObject extends DurableObject {
   private async handleHydrationWork(
     store: ReturnType<typeof asTypedStorage<RepoStateSchema>>
   ): Promise<boolean> {
-    try {
-      const work = await store.get("hydrationWork");
-      const queue = await store.get("hydrationQueue");
-      const hasQueue = Array.isArray(queue) ? queue.length > 0 : !!queue;
-      if (!work && !hasQueue) return false;
-      const cont = await processHydrationSlice(this.ctx, this.env, this.prefix());
-      if (cont) return true;
-      return false;
-    } catch (e) {
-      this.logger.error("alarm:hydration:error", { error: String(e) });
-      await scheduleAlarmIfSooner(this.ctx, this.env, Date.now() + 1000);
-      return true;
-    }
+    return await handleHydrationAlarmWork({
+      ctx: this.ctx,
+      env: this.env,
+      prefix: this.prefix(),
+      store,
+      logger: this.logger,
+    });
   }
 
   public async startHydration(options?: { dryRun?: boolean }): Promise<{
@@ -366,73 +378,12 @@ export class RepoDurableObject extends DurableObject {
     withPack: boolean = true
   ): Promise<{ commitOid: string; treeOid: string }> {
     await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const db = getDb(this.ctx.storage);
-    // Build empty tree object (content is empty)
-    const treeContent = new Uint8Array(0);
-    const { oid: treeOid, zdata: treeZ } = await encodeGitObjectAndDeflate("tree", treeContent);
-
-    // Build a simple commit pointing to empty tree
-    const author = `You <you@example.com> 0 +0000`;
-    const committer = author;
-    const msg = "initial\n";
-    const commitPayload =
-      `tree ${treeOid}\n` + `author ${author}\n` + `committer ${committer}\n` + `\n${msg}`;
-    const { oid: commitOid, zdata: commitZ } = await encodeGitObjectAndDeflate(
-      "commit",
-      new TextEncoder().encode(commitPayload)
-    );
-
-    if (withPack) {
-      // Create a real pack file in R2 containing the tree and commit
-      // This ensures streaming fetch operations will work correctly
-
-      // First, decompress the objects to get their raw payloads
-      const treeParsed = await inflateAndParseHeader(treeZ);
-      const commitParsed = await inflateAndParseHeader(commitZ);
-
-      if (!treeParsed || !commitParsed) throw new Error("Failed to parse minimal repo objects");
-
-      // Build a pack file with these objects
-      const packData = await buildPackV2([
-        { type: treeParsed.type, payload: treeParsed.payload },
-        { type: commitParsed.type, payload: commitParsed.payload },
-      ]);
-
-      // Generate pack key with proper R2 prefix
-      const packFileName = `pack-test-${Date.now()}.pack`;
-      const packKey = r2PackKey(this.prefix(), packFileName);
-
-      // Store the actual pack file in R2
-      await this.env.REPO_BUCKET.put(packKey, packData);
-
-      // Create and store the index file
-      const packOids = await indexPackOnly(packData, this.env, packKey, this.ctx, this.prefix());
-
-      // Store pack metadata in DO storage (use full R2 key like receive.ts does)
-      await store.put("lastPackKey", packKey); // Store the full R2 key
-      await store.put("lastPackOids", packOids);
-      await store.put("packList", [packKey]);
-
-      // Also persist pack membership into SQLite for consistency with runtime paths
-      try {
-        await insertPackOids(db, packKey, packOids);
-      } catch {}
-
-      // Also store objects as loose in DO for direct access
-      await store.put(objKey(treeOid), treeZ);
-      await store.put(objKey(commitOid), commitZ);
-    } else {
-      // Store as loose objects only (legacy behavior)
-      await store.put(objKey(treeOid), treeZ);
-      await store.put(objKey(commitOid), commitZ);
-    }
-
-    // Update refs
-    await store.put("refs", [{ name: "refs/heads/main", oid: commitOid }]);
-    await store.put("head", { target: "refs/heads/main" });
-
-    return { treeOid, commitOid };
+    return await seedMinimalRepoState({
+      ctx: this.ctx,
+      env: this.env,
+      prefix: this.prefix(),
+      withPack,
+    });
   }
 
   /**

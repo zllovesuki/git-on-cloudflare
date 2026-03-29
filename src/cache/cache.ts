@@ -8,6 +8,8 @@
  */
 
 import { asBodyInit } from "@/common/webtypes.ts";
+import type { IdxView, PackCatalogRow, PackedObjectResult } from "@/git/object-store/types.ts";
+import type { RepoStorageMode } from "@/do/repo/repoState.ts";
 
 const CACHE_NAME_JSON = "git-on-cf:json";
 const CACHE_NAME_OBJECTS = "git-on-cf:objects";
@@ -29,6 +31,20 @@ export interface RequestMemo {
   packListPromise?: Promise<string[]>;
   /** Pack OIDs by pack key */
   packOids?: Map<string, Set<string>>;
+  /** Active pack catalog snapshot for the current repo */
+  packCatalog?: PackCatalogRow[];
+  /** In-flight promise for the active pack catalog */
+  packCatalogPromise?: Promise<PackCatalogRow[]>;
+  /** Worker-side repo storage mode */
+  repoStorageMode?: RepoStorageMode;
+  /** In-flight promise for the repo storage mode */
+  repoStorageModePromise?: Promise<RepoStorageMode>;
+  /** Parsed idx views keyed by full pack key */
+  idxViews?: Map<string, IdxView>;
+  /** Worker-local packed object results */
+  packedObjects?: Map<string, PackedObjectResult | null>;
+  /** In-flight worker-local packed object reads */
+  packedObjectPromises?: Map<string, Promise<PackedObjectResult | undefined>>;
   /** In-memory virtual FS for pack files to reuse across OIDs (current repo only) */
   packFiles?: Map<string, Uint8Array>;
   /** Small flags set for once-per-request log throttling and guards */

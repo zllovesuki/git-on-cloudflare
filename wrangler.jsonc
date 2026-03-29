@@ -54,6 +54,21 @@
       "bucket_name": "git-repos"
     }
   ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "REPO_MAINT_QUEUE",
+        "queue": "git-on-cloudflare-repo-maint"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "git-on-cloudflare-repo-maint",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1
+      }
+    ]
+  },
   "observability": {
     "enabled": true
   },

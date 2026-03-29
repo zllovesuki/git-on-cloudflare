@@ -1,6 +1,7 @@
 import type { CacheContext } from "@/cache/index.ts";
 import type { TreeEntry } from "./types.ts";
 import { packIndexKey } from "@/keys.ts";
+import { loadRepoStorageMode, validatePackedObjectShadowRead } from "@/git/object-store/index.ts";
 import { getPackCandidates } from "../packDiscovery.ts";
 import { getLimiter, countSubrequest } from "../limits.ts";
 import { createMemPackFs, createStubLooseLoader } from "@/git/pack/index.ts";
@@ -48,6 +49,16 @@ export async function readBlobStream(
   repoId: string,
   oid: string
 ): Promise<Response | null> {
+  const mode = await loadRepoStorageMode(env, repoId);
+  if (mode === "shadow-read") {
+    try {
+      // Raw/blob routes still stream from the legacy object source in phase 1.
+      // Force one legacy read first so shadow mode validates the packed resolver
+      // without changing the user-visible response path yet.
+      await readLooseObjectRaw(env, repoId, oid);
+    } catch {}
+  }
+
   const stub = getRepoStub(env, repoId);
   const objStream = await stub.getObjectStream(oid);
   if (!objStream) return null;
@@ -119,6 +130,12 @@ export async function readLooseObjectRaw(
 
   const heavyNoCache = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
   const limiter = getLimiter(cacheCtx);
+  const withShadowValidation = async (value: { type: string; payload: Uint8Array } | undefined) => {
+    try {
+      await validatePackedObjectShadowRead(env, repoId, oidLc, value, cacheCtx);
+    } catch {}
+    return value;
+  };
 
   async function addPackToFiles(
     env: Env,
@@ -390,7 +407,7 @@ export async function readLooseObjectRaw(
         cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
         cacheCtx.memo.objects.set(oidLc, loaded);
       }
-      return loaded;
+      return await withShadowValidation(loaded);
     }
 
     const loaded = await doLoad();
@@ -400,12 +417,12 @@ export async function readLooseObjectRaw(
         cacheCtx.ctx?.waitUntil?.(savePromise);
       } catch {}
     }
-    return loaded;
+    return await withShadowValidation(loaded);
   }
 
   {
     const stateResult = await loadFromState();
-    if (stateResult) return stateResult;
-    return await loadFromPacks();
+    if (stateResult) return await withShadowValidation(stateResult);
+    return await withShadowValidation(await loadFromPacks());
   }
 }
