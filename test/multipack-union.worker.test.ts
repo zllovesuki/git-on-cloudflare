@@ -15,6 +15,7 @@ import {
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
 import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
 import { asBufferSource, deflate, inflate } from "@/common/index.ts";
+import { doPrefix } from "@/keys.ts";
 
 async function readLoose(
   getStub: () => DurableObjectStub<RepoDurableObject>,
@@ -116,16 +117,22 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
   const idxB = filesB.get("/git/objects/pack/pack-b.idx");
   if (!idxB) throw new Error("failed to create idxB");
 
-  // Upload pack+idx to R2 under arbitrary keys
-  const keyA = `test/${crypto.randomUUID()}/pack-a.pack`;
-  const keyB = `test/${crypto.randomUUID()}/pack-b.pack`;
+  let prefix = "";
+  await runDOWithRetry(getStub, async (_instance, state: DurableObjectState) => {
+    prefix = doPrefix(state.id.toString());
+  });
+
+  // Upload pack+idx to R2 under the repo prefix so catalog backfill can
+  // seed `pack_catalog` from the same R2 layout used in production.
+  const keyA = `${prefix}/objects/pack/pack-a.pack`;
+  const keyB = `${prefix}/objects/pack/pack-b.pack`;
   await env.REPO_BUCKET.put(keyA, packA);
   await env.REPO_BUCKET.put(keyA.replace(/\.pack$/, ".idx"), idxA);
   await env.REPO_BUCKET.put(keyB, packB);
   await env.REPO_BUCKET.put(keyB.replace(/\.pack$/, ".idx"), idxB);
 
   // Register pack metadata in DO storage
-  await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
+  await runDOWithRetry(getStub, async (_instance, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
     await store.put("packList", [keyA, keyB]);
 
@@ -134,6 +141,8 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
     await insertPackOids(db, keyA, [commitOid]);
     await insertPackOids(db, keyB, [treeOid]);
   });
+
+  await callStubWithRetry(getStub, (stub) => stub.getActivePackCatalog());
 
   // Streaming v2: two-phase fetch. First negotiate (done=false)
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;

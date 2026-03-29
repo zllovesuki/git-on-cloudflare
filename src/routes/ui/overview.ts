@@ -6,7 +6,7 @@ import { isValidOwnerRepo, bytesToText } from "@/web";
 import { renderUiView } from "@/client/server/render";
 import { listReposForOwner } from "@/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/cache";
-import { getUnpackProgress } from "@/common";
+import { getRepoActivity } from "@/common";
 import { repoKey } from "@/keys";
 import { badRequest, loadHeadAndRefsCached } from "./helpers";
 import type { RouteRequest } from "./helpers";
@@ -91,9 +91,7 @@ export async function handleRepoOverview(request: RouteRequest, env: Env, ctx: E
     ctx
   );
   const readmeMd = readmeData?.md || "";
-
-  // Check unpacking progress (shared helper)
-  const progress = await getUnpackProgress(env, repoId);
+  const progress = await getRepoActivity(env, repoId);
 
   const html = await renderUiView(env, "overview", {
     title: `${owner}/${repo}`,

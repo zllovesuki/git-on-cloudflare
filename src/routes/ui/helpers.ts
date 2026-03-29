@@ -4,11 +4,11 @@ import { shortRefName } from "@/git/refDisplay.ts";
 import { formatSize, HttpError } from "@/web";
 import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/cache";
-import type { debugState } from "@/do/repo/debug";
+import type { DebugStateSnapshot } from "@/do/repo/debug";
 import { getConfig } from "@/do/repo/repoConfig.ts";
 
-export type DebugState = Awaited<ReturnType<typeof debugState>>;
-export type HydrationData = DebugState["hydration"];
+export type DebugState = DebugStateSnapshot;
+export type CompactionData = DebugState["compaction"];
 export type RouteRequest = Request & {
   params: { owner: string; repo: string; [key: string]: string };
 };
@@ -64,47 +64,39 @@ export function computeStorageMetrics(state: Partial<DebugState> | undefined): {
   storageSize: string;
   packCount: number;
   packList: string[];
-  hydrationPackCount: number;
+  supersededPackCount: number;
 } {
   let totalStorageBytes = 0;
-  const packStats = (state?.packStats as Array<{ packSize?: number; indexSize?: number }>) || [];
+  const packStats = state?.packStats ?? [];
   for (const pack of packStats) {
     if (typeof pack.packSize === "number") totalStorageBytes += pack.packSize;
     if (typeof pack.indexSize === "number") totalStorageBytes += pack.indexSize;
   }
   const storageSize = formatSize(totalStorageBytes);
-  const packList: string[] = Array.isArray(state?.packList) ? (state!.packList as string[]) : [];
-  const packCount =
-    typeof state?.packListCount === "number" ? (state!.packListCount as number) : packList.length;
-  const hydrationPackCount =
-    typeof state?.hydrationPackCount === "number"
-      ? (state!.hydrationPackCount as number)
-      : packList.filter((p) => typeof p === "string" && p.includes("pack-hydr-")).length;
-  return { storageSize, packCount, packList, hydrationPackCount };
+  const activePacks = state?.activePacks ?? [];
+  const packList = activePacks.map((pack) => pack.key);
+  const packCount = packList.length;
+  const supersededPackCount = state?.supersededPacks?.length ?? 0;
+  return { storageSize, packCount, packList, supersededPackCount };
 }
 
-export function computeHydrationStatus(
-  hydrationData: HydrationData | undefined,
-  packCount: number,
-  hydrationPackCount: number
-): { hydrationStatus: string; hydrationStartedAt: string | null } {
-  let hydrationStatus = "Not Started";
-  let hydrationStartedAt: string | null = null;
-  if (hydrationData?.running) {
-    hydrationStatus = `Running: ${hydrationData.stage || "unknown"}`;
-    if (hydrationData.startedAt) {
+export function computeCompactionStatus(compactionData: CompactionData | undefined): {
+  compactionStatus: string;
+  compactionStartedAt: string | null;
+} {
+  let compactionStatus = "Idle";
+  let compactionStartedAt: string | null = null;
+  if (compactionData?.running) {
+    compactionStatus = "Running";
+    if (compactionData.startedAt) {
       try {
-        hydrationStartedAt = new Date(hydrationData.startedAt).toLocaleString();
+        compactionStartedAt = new Date(compactionData.startedAt).toLocaleString();
       } catch {}
     }
-  } else if (hydrationData?.stage === "done") {
-    hydrationStatus = "Completed";
-  } else if (hydrationData && hydrationData.queued > 0) {
-    hydrationStatus = `Queued (${hydrationData.queued} pending)`;
-  } else if (packCount > 0 && hydrationPackCount > 0) {
-    hydrationStatus = "Completed (hydration packs present)";
+  } else if (compactionData?.queued) {
+    compactionStatus = "Queued";
   }
-  return { hydrationStatus, hydrationStartedAt };
+  return { compactionStatus, compactionStartedAt };
 }
 
 export function computeNextMaintenance(

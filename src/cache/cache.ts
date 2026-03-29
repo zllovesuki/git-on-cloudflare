@@ -41,21 +41,17 @@ export interface RequestMemo {
   repoStorageModePromise?: Promise<RepoStorageMode>;
   /** Parsed idx views keyed by full pack key */
   idxViews?: Map<string, IdxView>;
+  /** In-flight idx view loads keyed by pack key plus size hint when present */
+  idxViewPromises?: Map<string, Promise<IdxView | undefined>>;
   /** Worker-local packed object results */
   packedObjects?: Map<string, PackedObjectResult | null>;
   /** In-flight worker-local packed object reads */
   packedObjectPromises?: Map<string, Promise<PackedObjectResult | undefined>>;
-  /** In-memory virtual FS for pack files to reuse across OIDs (current repo only) */
-  packFiles?: Map<string, Uint8Array>;
   /** Small flags set for once-per-request log throttling and guards */
   flags?: Set<string>;
-  /** Remaining DO batch budget for getObjectRefsBatch (shared across both closures) */
-  doBatchBudget?: number;
-  /** If true, disable further DO refs batches due to errors or budgets */
-  doBatchDisabled?: boolean;
-  /** Count of DO-backed loose loader calls (stub.getObject) within this request */
+  /** Count of compatibility loose-object RPC reads (stub.getObject) within this request */
   loaderCalls?: number;
-  /** Soft cap for DO-backed loose loader calls; can be adjusted between phases (closure vs fallback) */
+  /** Soft cap for compatibility loose-object RPC reads; can be adjusted between phases */
   loaderCap?: number;
   /** Optional per-request soft subrequest budget to degrade before hitting platform hard limits */
   subreqBudget?: number;

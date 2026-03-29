@@ -1,32 +1,49 @@
+import type {
+  RepoStorageModeControl,
+  RepoStorageModeMutationResult,
+} from "@/contracts/repoStorageMode.ts";
+
 export type PackStat = {
-  key?: string;
-  packSize?: number;
-  indexSize?: number;
-  hasIndex?: boolean;
+  key: string;
+  kind: "receive" | "compact" | "legacy";
+  state: "active" | "superseded";
+  tier: number;
+  seqLo: number;
+  seqHi: number;
+  objectCount: number;
+  packSize: number;
+  indexSize: number;
+  hasIndex: boolean;
+  createdAt: number;
+  supersededBy?: string | null;
 };
 
-export type HydrationData = {
+export type CompactionData = {
   running?: boolean;
-  stage?: string;
   startedAt?: number;
-  queued?: number;
-  error?: string;
-  progress?: {
-    packIndex?: number;
-    producedBytes?: number;
-    segmentSeq?: number;
-  };
+  queued?: boolean;
+  wantedAt?: number;
 };
+
+export type { GuardedRepoStorageMode } from "@/contracts/repoStorageMode.ts";
+export type { RepoStorageModeControl, RepoStorageModeMutationResult };
 
 export type AdminState = {
   packStats?: PackStat[];
   meta?: { doId?: string };
+  repoStorageMode?: string;
+  packCatalogVersion?: number;
+  activePacks?: PackStat[];
+  supersededPacks?: PackStat[];
+  receiveLease?: {
+    createdAt: number;
+    expiresAt: number;
+  };
+  compaction?: CompactionData;
   looseR2SampleBytes?: number;
   looseR2SampleCount?: number;
   looseR2Truncated?: boolean;
   dbSizeBytes?: number;
-  unpackWork?: { processedCount?: number; totalCount?: number };
-  unpackNext?: unknown;
 };
 
 export type RepoAdminProps = {
@@ -39,11 +56,12 @@ export type RepoAdminProps = {
   packCount: number;
   packList: string[];
   state: AdminState;
+  storageModeControl?: RepoStorageModeControl;
   defaultBranch: string;
-  hydrationStatus: string;
-  hydrationStartedAt?: string | null;
-  hydrationData?: HydrationData;
-  hydrationPackCount: number;
+  compactionStatus: string;
+  compactionStartedAt?: string | null;
+  compactionData?: CompactionData;
+  supersededPackCount: number;
   nextMaintenanceIn?: string;
   nextMaintenanceAt?: string;
 };

@@ -5,7 +5,7 @@ import type { RepoDurableObject } from "@/index";
 import { concatChunks, encodeGitObject } from "@/git/core/index.ts";
 import { hexToBytes } from "@/common/index.ts";
 import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
-import { doPrefix, r2PackKey } from "@/keys.ts";
+import { doPrefix, r2LooseKey, r2PackKey } from "@/keys.ts";
 import { getDb, listActivePackCatalog, listPackCatalog } from "@/do/repo/db/index.ts";
 import { indexPackOnly } from "@/git/pack/index.ts";
 import { buildPack } from "./git-pack.ts";
@@ -21,6 +21,7 @@ export type SeedLegacyPackedRepoArgs = {
   refs?: Ref[];
   head?: Head;
   looseObjects?: EncodedGitObject[];
+  mirrorLooseToR2?: boolean;
 };
 
 export type SeedPackedRepoResult = {
@@ -65,6 +66,9 @@ export async function seedLegacyPackedRepo(
 
     for (const obj of args.looseObjects ?? []) {
       await store.put(objKey(obj.oid), obj.zdata);
+      if (args.mirrorLooseToR2) {
+        await args.env.REPO_BUCKET.put(r2LooseKey(prefix, obj.oid), obj.zdata);
+      }
     }
 
     for (let i = 0; i < args.packs.length; i++) {
@@ -90,11 +94,36 @@ export async function seedLegacyPackedRepo(
   return { getStub: args.getStub, packKeys };
 }
 
-export async function seedPackedRepo(args: {
+type SeedPackedRepoArgs = {
   env: Env;
   repoId: string;
   getStub: () => DurableObjectStub<RepoDurableObject>;
-}): Promise<SeedPackedRepoResult> {
+  options?: { mirrorLooseToR2?: boolean };
+};
+
+export async function seedPackedRepo(args: SeedPackedRepoArgs): Promise<SeedPackedRepoResult>;
+export async function seedPackedRepo(
+  env: Env,
+  repoId: string,
+  getStub: () => DurableObjectStub<RepoDurableObject>,
+  options?: { mirrorLooseToR2?: boolean }
+): Promise<SeedPackedRepoResult>;
+export async function seedPackedRepo(
+  envOrArgs: Env | SeedPackedRepoArgs,
+  repoId?: string,
+  getStub?: () => DurableObjectStub<RepoDurableObject>,
+  options?: { mirrorLooseToR2?: boolean }
+): Promise<SeedPackedRepoResult> {
+  const args =
+    "env" in envOrArgs
+      ? envOrArgs
+      : {
+          env: envOrArgs,
+          repoId: repoId!,
+          getStub: getStub!,
+          options,
+        };
+
   const author = "You <you@example.com> 0 +0000";
   const blobPayload = new TextEncoder().encode("hello from packed storage\n");
   const blob = await encodeGitObject("blob", blobPayload);
@@ -131,6 +160,7 @@ export async function seedPackedRepo(args: {
     ],
     head: { target: "refs/heads/main", oid: commit.oid },
     looseObjects: [blob, tree, commit, tag],
+    mirrorLooseToR2: args.options?.mirrorLooseToR2,
   });
 
   return {
@@ -159,4 +189,43 @@ export async function readRepoCatalogState(
       };
     }
   );
+}
+
+export async function deleteLooseObjectCopies(args: {
+  env: Env;
+  getStub: () => DurableObjectStub<RepoDurableObject>;
+  objectOids: string[];
+}): Promise<void>;
+export async function deleteLooseObjectCopies(
+  env: Env,
+  getStub: () => DurableObjectStub<RepoDurableObject>,
+  objectOids: string[]
+): Promise<void>;
+export async function deleteLooseObjectCopies(
+  envOrArgs:
+    | Env
+    | {
+        env: Env;
+        getStub: () => DurableObjectStub<RepoDurableObject>;
+        objectOids: string[];
+      },
+  getStub?: () => DurableObjectStub<RepoDurableObject>,
+  objectOids?: string[]
+): Promise<void> {
+  const args =
+    "env" in envOrArgs && "getStub" in envOrArgs && "objectOids" in envOrArgs
+      ? envOrArgs
+      : {
+          env: envOrArgs as Env,
+          getStub: getStub!,
+          objectOids: objectOids!,
+        };
+
+  await runDOWithRetry(args.getStub, async (_instance, state) => {
+    const prefix = doPrefix(state.id.toString());
+    for (const oid of args.objectOids) {
+      await state.storage.delete(objKey(oid));
+      await args.env.REPO_BUCKET.delete(r2LooseKey(prefix, oid));
+    }
+  });
 }

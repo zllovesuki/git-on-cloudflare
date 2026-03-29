@@ -1,21 +1,22 @@
 import type { HeadInfo, Ref } from "@/git";
 import { isValidOwnerRepo } from "@/web";
 import { renderUiView } from "@/client/server/render";
-import { getUnpackProgress, getRepoStub, unauthorizedAdminBasic } from "@/common";
+import { getRepoActivity, getRepoStub, unauthorizedAdminBasic } from "@/common";
 import { verifyAuth } from "@/auth";
 import { repoKey } from "@/keys";
 import {
   badRequest,
   computeStorageMetrics,
-  computeHydrationStatus,
+  computeCompactionStatus,
   computeNextMaintenance,
   getDefaultBranchFromHead,
   loadHeadAndRefsCached,
   type DebugState,
+  type RouteRequest,
 } from "./helpers";
 
-export async function handleAdminPage(request: Request, env: Env, ctx: ExecutionContext) {
-  const { owner, repo } = (request as any).params;
+export async function handleAdminPage(request: RouteRequest, env: Env, ctx: ExecutionContext) {
+  const { owner, repo } = request.params;
 
   // Validate parameters
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
@@ -34,25 +35,22 @@ export async function handleAdminPage(request: Request, env: Env, ctx: Execution
   const [state, refsData, progress] = await Promise.all([
     stub.debugState().catch(() => ({}) as Partial<DebugState>),
     loadHeadAndRefsCached(env, request, ctx, repoId),
-    getUnpackProgress(env, repoId),
+    getRepoActivity(env, repoId),
   ]);
+  const storageModeControl = await stub.getRepoStorageModeControl().catch(() => undefined);
 
   const head: HeadInfo | undefined = refsData?.head || undefined;
   const refs: Ref[] = refsData?.refs || [];
 
-  const { storageSize, packCount, packList, hydrationPackCount } = computeStorageMetrics(state);
-  const { hydrationStatus, hydrationStartedAt } = computeHydrationStatus(
-    state.hydration,
-    packCount,
-    hydrationPackCount
-  );
+  const { storageSize, packCount, packList, supersededPackCount } = computeStorageMetrics(state);
+  const { compactionStatus, compactionStartedAt } = computeCompactionStatus(state.compaction);
 
   const defaultBranch = getDefaultBranchFromHead(head);
   const refEnc = encodeURIComponent(defaultBranch);
 
   const { nextMaintenanceIn, nextMaintenanceAt } = computeNextMaintenance(
     env,
-    typeof state?.lastMaintenanceMs === "number" ? (state!.lastMaintenanceMs as number) : undefined
+    typeof state?.lastMaintenanceMs === "number" ? state.lastMaintenanceMs : undefined
   );
 
   const html = await renderUiView(env, "admin", {
@@ -66,11 +64,12 @@ export async function handleAdminPage(request: Request, env: Env, ctx: Execution
     packCount,
     packList,
     state,
+    storageModeControl,
     defaultBranch,
-    hydrationStatus,
-    hydrationStartedAt,
-    hydrationData: state.hydration,
-    hydrationPackCount,
+    compactionStatus,
+    compactionStartedAt,
+    compactionData: state.compaction,
+    supersededPackCount,
     progress,
     nextMaintenanceIn,
     nextMaintenanceAt,

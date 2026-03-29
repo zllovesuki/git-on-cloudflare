@@ -1,7 +1,7 @@
 import type { CacheContext } from "@/cache/index.ts";
-import { parseCommitRefs, parseTreeChildOids, parseTagTarget } from "@/git/core/index.ts";
-import { getRepoStub, createLogger } from "@/common/index.ts";
-import { getLimiter, countSubrequest } from "../limits.ts";
+import { parseCommitRefs, parseTagTarget, parseTreeChildOids } from "@/git/core/index.ts";
+import { createLogger } from "@/common/index.ts";
+import { readObjectRefsBatch } from "@/git/object-store/index.ts";
 import { findCommonHaves } from "../closure.ts";
 import { readLooseObjectRaw } from "../read/index.ts";
 
@@ -13,8 +13,6 @@ export async function computeNeededFast(
   cacheCtx?: CacheContext
 ): Promise<string[]> {
   const log = createLogger(env.LOG_LEVEL, { service: "NeededFast", repoId });
-  const stub = getRepoStub(env, repoId);
-  const limiter = getLimiter(cacheCtx);
   const startTime = Date.now();
 
   log.debug("fast:building-stop-set", { haves: haves.length });
@@ -71,11 +69,9 @@ export async function computeNeededFast(
     cacheCtx.memo.flags = cacheCtx.memo.flags || new Set<string>();
   }
 
-  let doBatchBudget = cacheCtx?.memo?.doBatchBudget ?? 20;
-  let doBatchDisabled = cacheCtx?.memo?.doBatchDisabled ?? false;
-  let doBatchCalls = 0;
+  let refsBatchCalls = 0;
   let memoRefsHits = 0;
-  let fallbackReads = 0;
+  let compatFallbackReads = 0;
 
   log.info("fast:starting-closure", { wants: wants.length, stopSet: stopSet.size });
 
@@ -128,7 +124,7 @@ export async function computeNeededFast(
       for (const oid of toProcess) {
         const lc = oid.toLowerCase();
         const cached = cacheCtx.memo.refs.get(lc);
-        if (cached && cached.length >= 0) {
+        if (cached !== undefined) {
           refsMap.set(oid, cached);
           memoRefsHits++;
         }
@@ -136,74 +132,58 @@ export async function computeNeededFast(
     }
 
     const toBatch = toProcess.filter((oid) => !refsMap.has(oid));
-    if (toBatch.length > 0 && !doBatchDisabled && doBatchBudget > 0) {
+    if (toBatch.length > 0) {
       try {
-        const batchMap = await limiter.run("do:getObjectRefsBatch", async () => {
-          countSubrequest(cacheCtx);
-          return await stub.getObjectRefsBatch(toBatch);
-        });
-        doBatchBudget--;
-        doBatchCalls++;
+        const batchMap = await readObjectRefsBatch(env, repoId, toBatch, cacheCtx);
+        refsBatchCalls++;
 
-        for (const [oid, refs] of batchMap) {
+        for (const oid of toBatch) {
+          const refs = batchMap.get(oid);
+          if (refs === undefined) continue;
           const lc = oid.toLowerCase();
-          if (refs && refs.length >= 0) {
-            refsMap.set(oid, refs);
-            if (cacheCtx?.memo) {
-              cacheCtx.memo.refs = cacheCtx.memo.refs || new Map<string, string[]>();
-              cacheCtx.memo.refs.set(lc, refs);
-            }
+          // An empty refs array is still a resolved answer for leaf objects.
+          // Only omitted keys fall through to the compatibility shim below.
+          refsMap.set(oid, refs);
+          if (cacheCtx?.memo) {
+            cacheCtx.memo.refs = cacheCtx.memo.refs || new Map<string, string[]>();
+            cacheCtx.memo.refs.set(lc, refs);
           }
         }
       } catch (e) {
         log.debug("fast:batch-error", { error: String(e) });
-        doBatchDisabled = true;
       }
     }
 
     const stillMissing = toProcess.filter((oid) => !refsMap.has(oid));
     if (stillMissing.length > 0) {
-      const CONC = 4;
-      let idx = 0;
-      const workers: Promise<void>[] = [];
-
-      const fetchOne = async () => {
-        while (idx < stillMissing.length) {
-          const oid = stillMissing[idx++];
-          fallbackReads++;
-
-          try {
-            const obj = await readLooseObjectRaw(env, repoId, oid, cacheCtx);
-            if (!obj) continue;
-
-            const refs: string[] = [];
-            if (obj.type === "commit") {
-              const commitRefs = parseCommitRefs(obj.payload);
-              if (commitRefs.tree) refs.push(commitRefs.tree);
-              if (commitRefs.parents) refs.push(...commitRefs.parents);
-            } else if (obj.type === "tree") {
-              const childOids = parseTreeChildOids(obj.payload);
-              refs.push(...childOids);
-            } else if (obj.type === "tag") {
-              const tagInfo = parseTagTarget(obj.payload);
-              if (tagInfo?.targetOid) refs.push(tagInfo.targetOid);
-            }
-
-            refsMap.set(oid, refs);
-            if (cacheCtx?.memo) {
-              const lc = oid.toLowerCase();
-              cacheCtx.memo.refs = cacheCtx.memo.refs || new Map<string, string[]>();
-              cacheCtx.memo.refs.set(lc, refs);
-            }
-          } catch {}
+      log.debug("fast:compat-ref-fallback", { count: stillMissing.length });
+      for (const oid of stillMissing) {
+        try {
+          const obj = await readLooseObjectRaw(env, repoId, oid, cacheCtx);
+          compatFallbackReads++;
+          const refs: string[] = [];
+          if (obj?.type === "commit") {
+            const commitRefs = parseCommitRefs(obj.payload);
+            if (commitRefs.tree) refs.push(commitRefs.tree);
+            refs.push(...commitRefs.parents);
+          } else if (obj?.type === "tree") {
+            refs.push(...parseTreeChildOids(obj.payload));
+          } else if (obj?.type === "tag") {
+            const tag = parseTagTarget(obj.payload);
+            if (tag?.targetOid) refs.push(tag.targetOid);
+          }
+          refsMap.set(oid, refs);
+          if (cacheCtx?.memo) {
+            cacheCtx.memo.refs = cacheCtx.memo.refs || new Map<string, string[]>();
+            cacheCtx.memo.refs.set(oid.toLowerCase(), refs);
+          }
+        } catch (error) {
+          log.debug("fast:compat-read-error", { oid, error: String(error) });
         }
-      };
-
-      for (let c = 0; c < CONC; c++) workers.push(fetchOne());
-      await Promise.all(workers);
+      }
     }
 
-    for (const [oid, refs] of refsMap) {
+    for (const refs of refsMap.values()) {
       for (const ref of refs) {
         if (!seen.has(ref)) {
           queue.push(ref);
@@ -212,19 +192,14 @@ export async function computeNeededFast(
     }
   }
 
-  if (cacheCtx?.memo) {
-    cacheCtx.memo.doBatchBudget = doBatchBudget;
-    cacheCtx.memo.doBatchDisabled = doBatchDisabled;
-  }
-
   const elapsed = Date.now() - startTime;
   log.info("fast:completed", {
     needed: needed.size,
     seen: seen.size,
     stopSet: stopSet.size,
     memoHits: memoRefsHits,
-    doBatches: doBatchCalls,
-    fallbacks: fallbackReads,
+    refsBatches: refsBatchCalls,
+    compatFallbacks: compatFallbackReads,
     timeMs: elapsed,
   });
 

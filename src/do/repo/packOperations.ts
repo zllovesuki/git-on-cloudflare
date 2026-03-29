@@ -11,6 +11,13 @@ import { createLogger } from "@/common";
 import { doPrefix, packIndexKey } from "@/keys.ts";
 import { asTypedStorage } from "./repoState.ts";
 import { removePackFromList } from "./packs.ts";
+import {
+  deletePackCatalogRows,
+  getDb,
+  getPackCatalogCount,
+  getPackCatalogRow,
+} from "./db/index.ts";
+import { getActivePackCatalogSnapshot } from "./catalog.ts";
 
 /**
  * Remove a specific pack file and its associated data
@@ -28,13 +35,22 @@ export async function removePack(
   deletedPack: boolean;
   deletedIndex: boolean;
   deletedMetadata: boolean;
+  rejected?: "active-pack" | "non-superseded-pack";
+  packState?: "active" | "superseded" | "unknown";
 }> {
   const log = createLogger(env.LOG_LEVEL, {
     service: "packOperations:removePack",
     doId: ctx.id.toString(),
   });
 
-  const result = {
+  const result: {
+    removed: boolean;
+    deletedPack: boolean;
+    deletedIndex: boolean;
+    deletedMetadata: boolean;
+    rejected?: "active-pack" | "non-superseded-pack";
+    packState?: "active" | "superseded" | "unknown";
+  } = {
     removed: false,
     deletedPack: false,
     deletedIndex: false,
@@ -42,25 +58,45 @@ export async function removePack(
   };
 
   try {
-    // Normalize the pack key - if it's just a filename, construct the full R2 key
     const prefix = doPrefix(ctx.id.toString());
     let fullPackKey = packKey;
+    const db = getDb(ctx.storage);
 
-    // If the key doesn't start with our prefix, it's likely just the filename
     if (!packKey.startsWith(prefix)) {
-      // Check if it's in the pack list to get the full key
       const store = asTypedStorage<RepoStateSchema>(ctx.storage);
       const packList = (await store.get("packList")) || [];
-
-      // Find the full key in the pack list that ends with this filename
       const matchingKey = packList.find((k) => k.endsWith(packKey) || k.endsWith(`/${packKey}`));
 
       if (matchingKey) {
         fullPackKey = matchingKey;
       } else {
-        // If not found in list, construct the expected path
         fullPackKey = `${prefix}/objects/pack/${packKey}`;
       }
+    }
+
+    if ((await getPackCatalogCount(db)) === 0) {
+      await getActivePackCatalogSnapshot(ctx, env, prefix, log);
+    }
+
+    const packCatalogRow = await getPackCatalogRow(db, fullPackKey);
+    const packState: "active" | "superseded" | "unknown" =
+      packCatalogRow?.state === "active"
+        ? "active"
+        : packCatalogRow?.state === "superseded"
+          ? "superseded"
+          : "unknown";
+    result.packState = packState;
+    if (packState !== "superseded") {
+      const rejected = packState === "active" ? "active-pack" : "non-superseded-pack";
+      log.warn("reject-pack-delete", {
+        packKey: fullPackKey,
+        packState,
+        rejected,
+      });
+      return {
+        ...result,
+        rejected,
+      };
     }
 
     log.info("removing-pack", { packKey: fullPackKey });
@@ -84,7 +120,10 @@ export async function removePack(
       log.debug("no-index-to-delete", { key: indexKey });
     }
 
-    // Remove from DO metadata
+    // Remove from DO metadata. The legacy mirrors and deprecated pack_objects
+    // table still need cleanup during the rollout window, but the pack catalog
+    // remains the authoritative state machine.
+    await deletePackCatalogRows(db, [fullPackKey]);
     await removePackFromList(ctx, fullPackKey);
     result.deletedMetadata = true;
 

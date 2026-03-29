@@ -5,7 +5,7 @@ export type DangerZoneCardProps = {
   defaultBranch: string;
   packList: string[];
   pending: Record<string, boolean>;
-  purgeRepo: (defaultBranch: string) => Promise<void>;
+  purgeRepo: () => Promise<void>;
 };
 
 export function DangerZoneCard({
@@ -32,7 +32,7 @@ export function DangerZoneCard({
         <Button
           variant="danger"
           type="button"
-          onClick={() => void purgeRepo(defaultBranch)}
+          onClick={() => void purgeRepo()}
           disabled={pending["purge-repo"]}
         >
           <Trash2 className="mr-2 inline h-4 w-4 align-[-2px]" aria-hidden="true" />

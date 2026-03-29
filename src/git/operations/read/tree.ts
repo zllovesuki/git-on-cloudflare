@@ -4,8 +4,6 @@ import { readLooseObjectRaw, parseTree } from "./objects.ts";
 import { resolveRef } from "./refs.ts";
 import { readCommit } from "./commits.ts";
 import { parseTagTarget } from "@/git/core/index.ts";
-import { getRepoStub, createLogger } from "@/common/index.ts";
-import { getLimiter, countSubrequest } from "../limits.ts";
 
 export async function readTree(
   env: Env,
@@ -26,17 +24,7 @@ export async function readPath(
   ref: string,
   path?: string,
   cacheCtx?: CacheContext
-): Promise<
-  | { type: "tree"; entries: TreeEntry[]; base: string }
-  | {
-      type: "blob";
-      oid: string;
-      content: Uint8Array;
-      base: string;
-      size?: number;
-      tooLarge?: boolean;
-    }
-> {
+): Promise<ReadPathResult> {
   let startOid: string | undefined = await resolveRef(env, repoId, ref);
   if (!startOid && /^[0-9a-f]{40}$/i.test(ref)) startOid = ref.toLowerCase();
   if (!startOid) throw new Error("Ref not found");
@@ -78,42 +66,12 @@ export async function readPath(
       }
     } else {
       if (i !== parts.length - 1) throw new Error("Path not a directory");
-
-      const stub = getRepoStub(env, repoId);
-      const log = createLogger(env.LOG_LEVEL, { service: "readPath", repoId });
-      const limiter = getLimiter(cacheCtx);
-      const size = await limiter.run("do:getObjectSize", async () => {
-        if (!countSubrequest(cacheCtx)) {
-          log.warn("soft-budget-exhausted", { op: "do:getObjectSize", oid: ent.oid });
-          return null;
-        }
-        try {
-          return await stub.getObjectSize(ent.oid);
-        } catch (e) {
-          log.debug("do:getObjectSize:error", { error: String(e), oid: ent.oid });
-          return null;
-        }
-      });
-      if (size === null) throw new Error("Blob not found");
-
-      const compressedSize = size;
       const MAX_SIZE = 5 * 1024 * 1024;
-      const estimatedSize = compressedSize * 10;
-
-      if (estimatedSize > MAX_SIZE) {
-        return {
-          type: "blob",
-          oid: ent.oid,
-          content: new Uint8Array(0),
-          base,
-          size: estimatedSize,
-          tooLarge: true,
-        };
-      }
-
       const blob = await readLooseObjectRaw(env, repoId, ent.oid, cacheCtx);
       if (!blob || blob.type !== "blob") throw new Error("Not a blob");
 
+      // Pack reads are authoritative here, so the UI size gate must be based
+      // on the resolved blob payload instead of legacy loose-object metadata.
       const actualSize = blob.payload.byteLength;
       if (actualSize > MAX_SIZE) {
         return {
@@ -132,6 +90,17 @@ export async function readPath(
   const rootEntries = await readTree(env, repoId, currentTreeOid, cacheCtx);
   return { type: "tree", entries: rootEntries, base };
 }
+
+export type ReadPathResult =
+  | { type: "tree"; entries: TreeEntry[]; base: string }
+  | {
+      type: "blob";
+      oid: string;
+      content: Uint8Array;
+      base: string;
+      size?: number;
+      tooLarge?: boolean;
+    };
 
 export function isTreeMode(mode: string): boolean {
   return mode.startsWith("40000");

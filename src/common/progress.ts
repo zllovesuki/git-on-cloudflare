@@ -5,13 +5,19 @@ export interface UnpackProgress {
   processed?: number;
   total?: number;
   percent?: number;
-  queuedCount?: number; // 0 or 1 (one-deep queue)
+  queuedCount?: number;
   currentPackKey?: string;
 }
 
+export interface RepoActivity {
+  state: "receiving" | "compacting";
+  startedAt?: number;
+  expiresAt?: number;
+}
+
 /**
- * Fetch unpacking progress data for a repository.
- * Returns null when no unpack is in progress.
+ * Legacy compatibility helper used by the current DO receive path and legacy
+ * queue tests while unpacking still exists behind the compatibility surface.
  */
 export async function getUnpackProgress(env: Env, repoId: string): Promise<UnpackProgress | null> {
   try {
@@ -22,4 +28,18 @@ export async function getUnpackProgress(env: Env, repoId: string): Promise<Unpac
     }
   } catch {}
   return null;
+}
+
+/**
+ * Fetch repository activity for banner rendering.
+ * Idle repos return null so callers can keep the existing "render nothing"
+ * behavior without interpreting unpack or hydration state as correctness data.
+ */
+export async function getRepoActivity(env: Env, repoId: string): Promise<RepoActivity | null> {
+  try {
+    const stub = getRepoStub(env, repoId);
+    return await stub.getRepoActivity();
+  } catch {
+    return null;
+  }
 }

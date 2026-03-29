@@ -1,12 +1,18 @@
 import type { CacheContext } from "@/cache/index.ts";
+import type { Logger } from "@/common/logger.ts";
 import type { PackedObjectResult } from "./types.ts";
 
 import { createBlobFromBytes, inflate } from "@/common/index.ts";
 import { parseCommitRefs, parseTagTarget, parseTreeChildOids } from "@/git/core/index.ts";
-import { readPackHeaderEx, readPackRange } from "@/git/pack/packMeta.ts";
+import {
+  MAX_SIMULTANEOUS_CONNECTIONS,
+  countSubrequest,
+  getLimiter,
+} from "@/git/operations/limits.ts";
+import { readPackHeaderExFromBuf, readPackRange } from "@/git/pack/packMeta.ts";
 import { loadActivePackCatalog } from "./catalog.ts";
 import { applyGitDelta } from "./delta.ts";
-import { getOidHexAt, loadIdxView } from "./idxView.ts";
+import { getOidHexAt, findOffsetIndex, getNextOffsetByIndex, loadIdxView } from "./idxView.ts";
 import { findObject } from "./lookup.ts";
 import {
   ensureMemo,
@@ -17,6 +23,62 @@ import {
   toPackedObjectResult,
   typeCodeToObjectType,
 } from "./support.ts";
+
+function countPackedSubrequest(
+  cacheCtx: CacheContext | undefined,
+  log: Logger,
+  details: { op: string; oid?: string; packKey?: string },
+  flag: string,
+  n?: number
+) {
+  if (countSubrequest(cacheCtx, n)) return;
+  logOnce(cacheCtx, flag, () => {
+    log.warn("soft-budget-exhausted", details);
+  });
+}
+
+async function readPackedEntry(
+  env: Env,
+  location: ResolvedLocation,
+  limiter: ReturnType<typeof getLimiter>,
+  cacheCtx: CacheContext | undefined,
+  log: Logger
+): Promise<
+  | {
+      header: NonNullable<ReturnType<typeof readPackHeaderExFromBuf>>;
+      compressed: Uint8Array;
+    }
+  | undefined
+> {
+  const entryLength = location.nextOffset - location.offset;
+  if (entryLength <= 0) return undefined;
+
+  // Read one contiguous entry span instead of "header + compressed payload" as
+  // separate range reads. That keeps the common read path to a single R2 fetch
+  // per packed base object and still lets us parse delta metadata locally.
+  const entry = await readPackRange(env, location.pack.packKey, location.offset, entryLength, {
+    limiter,
+    countSubrequest: (n?: number) => {
+      countPackedSubrequest(
+        cacheCtx,
+        log,
+        {
+          op: "r2:get-pack-entry",
+          oid: location.oid,
+          packKey: location.pack.packKey,
+        },
+        "packed-read-entry-soft-budget-warned",
+        n
+      );
+    },
+  });
+  if (!entry) return undefined;
+
+  const header = readPackHeaderExFromBuf(entry, 0);
+  if (!header) return undefined;
+  const compressed = entry.subarray(header.headerLen);
+  return { header, compressed };
+}
 
 async function readObjectFromLocation(
   env: Env,
@@ -29,27 +91,21 @@ async function readObjectFromLocation(
   if (visited.has(visitKey)) throw new Error("pack object recursion cycle");
   visited.add(visitKey);
   try {
-    const header = await readPackHeaderEx(env, location.pack.packKey, location.offset);
-    if (!header) return undefined;
+    const limiter = getLimiter(cacheCtx);
+    const log = getPackedObjectStoreLogger(env, repoId);
+    const entry = await readPackedEntry(env, location, limiter, cacheCtx, log);
+    if (!entry) return undefined;
+    const inflated = await inflate(entry.compressed);
 
-    const payloadStart = location.offset + header.headerLen;
-    const payloadLen = location.nextOffset - payloadStart;
-    if (payloadLen < 0) return undefined;
-    const compressed = await readPackRange(env, location.pack.packKey, payloadStart, payloadLen);
-    if (!compressed) return undefined;
-    const inflated = await inflate(compressed);
-
-    const baseType = typeCodeToObjectType(header.type);
+    const baseType = typeCodeToObjectType(entry.header.type);
     if (baseType) return toPackedObjectResult(location, baseType, inflated);
 
     let base: PackedObjectResult | undefined;
-    if (header.type === 6) {
-      // OFS_DELTA stays inside the same pack, so once we map the base offset back to an
-      // idx entry we can recurse without any extra catalog search.
-      const baseOffset = location.offset - (header.baseRel || 0);
-      const baseIndex = location.idx.offsetToIndex.get(baseOffset);
+    if (entry.header.type === 6) {
+      const baseOffset = location.offset - (entry.header.baseRel || 0);
+      const baseIndex = findOffsetIndex(location.idx, baseOffset);
       if (baseIndex === undefined) return undefined;
-      const baseNextOffset = location.idx.nextOffset.get(baseOffset);
+      const baseNextOffset = getNextOffsetByIndex(location.idx, baseIndex);
       if (baseNextOffset === undefined) return undefined;
       base = await readObjectFromLocation(
         env,
@@ -65,9 +121,8 @@ async function readObjectFromLocation(
         cacheCtx,
         visited
       );
-    } else if (header.type === 7 && header.baseOid) {
-      // REF_DELTA may cross pack boundaries, so fall back to the catalog-based resolver.
-      base = await readObject(env, repoId, header.baseOid, cacheCtx, visited);
+    } else if (entry.header.type === 7 && entry.header.baseOid) {
+      base = await readObject(env, repoId, entry.header.baseOid, cacheCtx, visited);
     }
     if (!base) return undefined;
 
@@ -132,12 +187,18 @@ export async function hasObjectsBatch(
   oids: string[],
   cacheCtx?: CacheContext
 ): Promise<boolean[]> {
-  return await Promise.all(
-    oids.map(async (oid) => {
-      const found = await findObject(env, repoId, oid, cacheCtx);
-      return !!found;
-    })
-  );
+  const results: boolean[] = [];
+  for (let i = 0; i < oids.length; i += MAX_SIMULTANEOUS_CONNECTIONS) {
+    const batch = oids.slice(i, i + MAX_SIMULTANEOUS_CONNECTIONS);
+    const batchResults = await Promise.all(
+      batch.map(async (oid) => {
+        const found = await findObject(env, repoId, oid, cacheCtx);
+        return !!found;
+      })
+    );
+    results.push(...batchResults);
+  }
+  return results;
 }
 
 export async function readObjectRefsBatch(
@@ -150,7 +211,8 @@ export async function readObjectRefsBatch(
   for (const oid of oids) {
     const obj = await readObject(env, repoId, oid, cacheCtx);
     if (!obj) {
-      out.set(oid, []);
+      // Omit missing objects so callers can still fall back to the compatibility
+      // loose-object shim during mixed shadow-read rollout states.
       continue;
     }
     if (obj.type === "commit") {
@@ -199,10 +261,12 @@ export async function* iterPackOids(
   cacheCtx?: CacheContext
 ): AsyncGenerator<string> {
   const packs = await loadActivePackCatalog(env, repoId, cacheCtx);
-  if (!packs.some((pack) => pack.packKey === packKey)) return;
-  const idx = await loadIdxView(env, packKey, cacheCtx);
+  const pack = packs.find((row) => row.packKey === packKey);
+  if (!pack) return;
+  const idx = await loadIdxView(env, packKey, cacheCtx, pack.packBytes);
   if (!idx) return;
   for (let i = 0; i < idx.count; i++) yield getOidHexAt(idx, i);
 }
 
 export { findObject } from "./lookup.ts";
+export { logPackedObjectMismatch } from "./support.ts";
