@@ -4,6 +4,7 @@ import type { RepoDurableObject } from "@/index";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/git";
 import { handleFetchV2Streaming } from "@/git/operations/uploadStream.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
+import { asBufferSource } from "@/common/index.ts";
 
 function buildFetchBody({
   wants,
@@ -159,7 +160,7 @@ describe("git fetch streaming (default)", () => {
     expect(pack.length).toBeGreaterThanOrEqual(32); // At least header + SHA-1
     const packBody = pack.subarray(0, pack.length - 20);
     const expectedSha = pack.subarray(pack.length - 20);
-    const actualSha = new Uint8Array(await crypto.subtle.digest("SHA-1", packBody));
+    const actualSha = new Uint8Array(await crypto.subtle.digest("SHA-1", asBufferSource(packBody)));
     expect(Array.from(actualSha)).toEqual(Array.from(expectedSha));
   });
 

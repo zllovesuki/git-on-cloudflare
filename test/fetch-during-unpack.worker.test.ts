@@ -2,13 +2,7 @@ import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import { uniqueRepoId } from "./util/test-helpers.ts";
 import { decodePktLines, pktLine, flushPkt, concatChunks, delimPkt } from "@/git";
-
-async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
-  const cs: any = new (globalThis as any).CompressionStream("deflate");
-  const stream = new Blob([data]).stream().pipeThrough(cs);
-  const buf = await new Response(stream).arrayBuffer();
-  return new Uint8Array(buf);
-}
+import { asBufferSource, deflate } from "@/common/index.ts";
 
 function encodeObjHeader(type: number, size: number): Uint8Array {
   let first = (type << 4) | (size & 0x0f);
@@ -37,10 +31,10 @@ async function buildPack(
   for (const o of objects) {
     const typeCode = o.type === "commit" ? 1 : o.type === "tree" ? 2 : o.type === "blob" ? 3 : 4;
     parts.push(encodeObjHeader(typeCode, o.payload.byteLength));
-    parts.push(await deflateRaw(o.payload));
+    parts.push(await deflate(o.payload));
   }
   const body = concatChunks(parts);
-  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));
+  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", asBufferSource(body)));
   const out = new Uint8Array(body.byteLength + 20);
   out.set(body, 0);
   out.set(sha, body.byteLength);

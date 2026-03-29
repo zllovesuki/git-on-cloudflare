@@ -13,7 +13,7 @@
     "test:auth": "vitest run --config vitest.config.ts test/auth.worker.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p test/tsconfig.json --noEmit",
     "cf-typegen": "wrangler types --strict-vars false",
     "db:gen": "drizzle-kit generate --config drizzle.config.ts"
   },
