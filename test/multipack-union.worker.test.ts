@@ -14,15 +14,17 @@ import {
 } from "@/git";
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
 import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
-import { deflate, inflate } from "@/common/index.ts";
+import { asBufferSource, deflate, inflate } from "@/common/index.ts";
 
 async function readLoose(
   getStub: () => DurableObjectStub<RepoDurableObject>,
   oid: string
 ): Promise<{ type: string; payload: Uint8Array }> {
-  const obj = await callStubWithRetry(getStub, (s) => s.getObject(oid));
+  const obj = await callStubWithRetry<ArrayBuffer | Uint8Array | null>(getStub, (s) =>
+    s.getObject(oid)
+  );
   if (!obj) throw new Error("missing loose " + oid);
-  const z = new Uint8Array(obj);
+  const z = obj instanceof Uint8Array ? obj : new Uint8Array(obj);
   const raw = await inflate(z);
   // parse header: "type size\0"
   let p = 0;
@@ -48,7 +50,7 @@ async function buildPack(objs: { type: string; payload: Uint8Array }[]): Promise
     parts.push(await deflate(o.payload));
   }
   const body = concatChunks(parts);
-  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));
+  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", asBufferSource(body)));
   const out = new Uint8Array(body.byteLength + 20);
   out.set(body, 0);
   out.set(sha, body.byteLength);

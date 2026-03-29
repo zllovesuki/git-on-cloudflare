@@ -3,6 +3,7 @@ import { SELF, env } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
+import { gzip } from "@/common/index.ts";
 
 function buildFetchBody({
   wants,
@@ -32,12 +33,6 @@ function buildLsRefsBody(args: string[] = []) {
   return concatChunks(chunks);
 }
 
-async function gzipBytes(data: Uint8Array): Promise<Uint8Array> {
-  const cs: any = new (globalThis as any).CompressionStream("gzip");
-  const stream = new Blob([data]).stream().pipeThrough(cs);
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
 it("upload-pack fetch accepts gzip-encoded request bodies", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-gzip-fetch");
@@ -48,7 +43,7 @@ it("upload-pack fetch accepts gzip-encoded request bodies", async () => {
     async (instance: RepoDurableObject) => instance.seedMinimalRepo()
   );
 
-  const body = await gzipBytes(buildFetchBody({ wants: [commitOid], done: true }));
+  const body = await gzip(buildFetchBody({ wants: [commitOid], done: true }));
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
   const res = await SELF.fetch(url, {
     method: "POST",
@@ -69,7 +64,7 @@ it("upload-pack fetch accepts gzip-encoded request bodies", async () => {
 it("upload-pack ls-refs accepts gzip-encoded request bodies", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-gzip-lsrefs");
-  const body = await gzipBytes(buildLsRefsBody(["ref-prefix refs/heads/"]));
+  const body = await gzip(buildLsRefsBody(["ref-prefix refs/heads/"]));
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
   const res = await SELF.fetch(url, {
     method: "POST",
