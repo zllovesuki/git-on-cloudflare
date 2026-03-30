@@ -2,13 +2,16 @@
  * Git object encoding/decoding utilities
  */
 
-import { bytesToHex } from "@/common/hex.ts";
 import { deflate } from "@/common/compression.ts";
+import { bytesToHex } from "@/common/hex.ts";
+import { asBufferSource, createDigestStream } from "@/common/webtypes.ts";
 
 /**
  * Git object types
  */
 export type GitObjectType = "blob" | "tree" | "commit" | "tag";
+
+const textEncoder = new TextEncoder();
 
 /**
  * Map Git object type to pack type code
@@ -49,6 +52,38 @@ export function encodeObjHeader(type: number, size: number): Uint8Array {
   return new Uint8Array(bytes);
 }
 
+function buildRawGitObject(type: GitObjectType, payload: Uint8Array): Uint8Array {
+  const header = encodeGitObjectHeader(type, payload.byteLength);
+  const raw = new Uint8Array(header.byteLength + payload.byteLength);
+  raw.set(header, 0);
+  raw.set(payload, header.byteLength);
+  return raw;
+}
+
+function encodeGitObjectHeader(type: GitObjectType, payloadLength: number): Uint8Array {
+  return textEncoder.encode(`${type} ${payloadLength}\0`);
+}
+
+/**
+ * Compute the raw 20-byte SHA-1 digest for a Git object payload.
+ * This avoids a hex roundtrip on hot paths that already store OIDs in binary.
+ */
+export async function computeOidBytes(
+  type: GitObjectType,
+  payload: Uint8Array
+): Promise<Uint8Array> {
+  const digestStream = createDigestStream("SHA-1");
+  const digestWriter = digestStream.getWriter();
+  await digestWriter.write(encodeGitObjectHeader(type, payload.byteLength));
+  await digestWriter.write(payload);
+  await digestWriter.close();
+  return new Uint8Array(await digestStream.digest);
+}
+
+async function computeOidBytesFromRaw(raw: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest("SHA-1", asBufferSource(raw)));
+}
+
 /**
  * Create a Git object with header and compute its OID
  * @param type - Git object type
@@ -59,12 +94,8 @@ export async function createGitObject(
   type: GitObjectType,
   payload: Uint8Array
 ): Promise<{ oid: string; raw: Uint8Array }> {
-  const header = new TextEncoder().encode(`${type} ${payload.byteLength}\0`);
-  const raw = new Uint8Array(header.byteLength + payload.byteLength);
-  raw.set(header, 0);
-  raw.set(payload, header.byteLength);
-  const hash = await crypto.subtle.digest("SHA-1", raw);
-  const oid = bytesToHex(new Uint8Array(hash));
+  const raw = buildRawGitObject(type, payload);
+  const oid = bytesToHex(await computeOidBytesFromRaw(raw));
   return { oid, raw };
 }
 
@@ -121,6 +152,5 @@ export function parseGitObject(raw: Uint8Array): { type: GitObjectType; payload:
  * @returns SHA-1 hash as hex string
  */
 export async function computeOid(type: GitObjectType, payload: Uint8Array): Promise<string> {
-  const { oid } = await createGitObject(type, payload);
-  return oid;
+  return bytesToHex(await computeOidBytes(type, payload));
 }

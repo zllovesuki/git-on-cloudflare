@@ -1,12 +1,13 @@
 // @ts-nocheck
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { readFileSync, existsSync } from "node:fs";
 import path from "path";
 import { BASE_TEST_BINDINGS } from "./test/vitest.bindings.ts";
 import { defineConfig } from "vitest/config";
 
 const AUTH_TEST_FILE = "test/auth.worker.test.ts";
 const OPTIMIZED_DEPS = ["sanitize-html", "postcss", "source-map-js"];
-const INLINE_DEPS = ["isomorphic-git", "@noble/hashes", ...OPTIMIZED_DEPS];
+const INLINE_DEPS = ["isomorphic-git", "@noble/hashes", "pako", ...OPTIMIZED_DEPS];
 const isAuthSuite =
   process.env.npm_lifecycle_event === "test:auth" ||
   process.argv.some((arg) => arg.includes("auth.worker.test.ts"));
@@ -43,6 +44,24 @@ export default defineConfig({
         bindings: {
           ...BASE_TEST_BINDINGS,
           AUTH_ADMIN_TOKEN: isAuthSuite ? "admin" : "",
+          PACK_INDEXER_FIXTURE: process.env.PACK_INDEXER_FIXTURE === "1" ? "1" : "",
+        },
+        serviceBindings: {
+          // Service binding that runs in Node.js (not workerd) for reading
+          // fixture files from disk. Tests call env.FIXTURE_READER.fetch()
+          // with the file path as the URL pathname.
+          async FIXTURE_READER(request: Request) {
+            const url = new URL(request.url);
+            const filePath = decodeURIComponent(url.pathname.slice(1));
+            const resolved = path.resolve(__dirname, filePath);
+            if (!existsSync(resolved)) {
+              return new Response("not found", { status: 404 });
+            }
+            const data = readFileSync(resolved);
+            return new Response(data, {
+              headers: { "Content-Length": String(data.byteLength) },
+            });
+          },
         },
       },
     }),

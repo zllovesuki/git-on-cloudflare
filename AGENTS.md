@@ -117,6 +117,8 @@ npm run format
 
 `npm run test:auth` runs only `test/auth.worker.test.ts` with `AUTH_ADMIN_TOKEN` enabled in the Vitest pool bindings.
 
+The 42 MiB pack-indexer fixture test is opt-in. Use `PACK_INDEXER_FIXTURE=1 npx vitest run --config vitest.config.ts test/pack-indexer-fixture.worker.test.ts` when you intentionally want to run it.
+
 Targeted commands:
 
 ```bash
