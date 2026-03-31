@@ -7,6 +7,7 @@ import { getDb, listPackCatalog } from "../db/index.ts";
 import {
   activeLeaseOrUndefined,
   getActivePackCatalogSnapshot,
+  getRollbackCompatControlFromStore,
   getRepoStorageModeValue,
 } from "../catalog.ts";
 import { toDebugPackState } from "./types.ts";
@@ -66,6 +67,7 @@ export async function debugState(ctx: DurableObjectState, env: Env): Promise<Deb
   const receiveLease = activeLeaseOrUndefined(await store.get("receiveLease"), now);
   const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), now);
   const compactionWantedAt = await store.get("compactionWantedAt");
+  const rollbackCompat = await getRollbackCompatControlFromStore(store);
 
   const looseSample = await listLooseSample(ctx);
   const dbSizeBytes = getDatabaseSize(ctx);
@@ -97,6 +99,7 @@ export async function debugState(ctx: DurableObjectState, env: Env): Promise<Deb
       wantedAt: compactionWantedAt,
       lease: compactLease,
     },
+    rollbackCompat,
     unpackWork: null,
     unpackNext: null,
     looseSample,

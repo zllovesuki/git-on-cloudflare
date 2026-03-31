@@ -8,6 +8,7 @@ import { scheduleAlarmIfSooner } from "@/do/repo/scheduler.ts";
 import * as git from "isomorphic-git";
 import { asBodyInit, createLogger } from "@/common/index.ts";
 import { getDb, oidExistsInPacks, insertPackOids } from "@/do/repo/db/index.ts";
+import { applyReceiveCommands, isValidRefName, validateReceiveCommands } from "./validation.ts";
 
 // Connectivity check for receive-pack commands.
 // Ensures that each updated ref points to an object we can resolve immediately:
@@ -230,7 +231,7 @@ async function runConnectivityCheck(args: {
               statuses[i] = { ref: c.ref, ok: false, msg: "missing-objects" };
               break;
             }
-            // Phase 2: also ensure all parents exist (basic connectivity)
+            // Also ensure all parents exist as part of the basic connectivity check.
             try {
               const info = await git.readCommit({ fs, dir, oid: newOidLc });
               const parents: string[] = Array.isArray(info?.commit?.parent)
@@ -329,27 +330,6 @@ export async function receivePack(
       }
     }
 
-    // Validate ref names and reject HEAD updates
-    function isValidRefName(name: string): boolean {
-      // Disallow direct HEAD and empty
-      if (!name || name === "HEAD") return false;
-      // Must start with refs/
-      if (!name.startsWith("refs/")) return false;
-      // Disallow forbidden characters and sequences per Git rules
-      // No control chars, no space, no tilde, caret, colon, question, asterisk, open bracket
-      if (/[\x00-\x20~^:?*\[]/.test(name)) return false;
-      // No consecutive slashes, no leading or trailing slash
-      if (name.includes("//") || name.startsWith("/") || name.endsWith("/")) return false;
-      // No components of "." or ".."
-      if (name.split("/").some((c) => c === "." || c === "..")) return false;
-      // Cannot end with a dot or .lock
-      if (name.endsWith(".") || name.endsWith(".lock")) return false;
-      // No "@{" sequence
-      if (name.includes("@{")) return false;
-      // No backslash
-      if (name.includes("\\")) return false;
-      return true;
-    }
     const invalids = cmds.filter((c) => !isValidRefName(c.ref));
     if (invalids.length > 0) {
       log.warn("receive:invalid-ref", { count: invalids.length, sample: invalids[0]?.ref });
@@ -414,46 +394,13 @@ export async function receivePack(
 
     // Load current refs state
     const refs = (await store.get("refs")) || [];
-    const refMap = new Map(refs.map((r) => [r.name, r.oid] as const));
 
     // Validate commands against current refs
     const statuses: { ref: string; ok: boolean; msg?: string }[] = [];
     if (!unpackOk) {
       for (const c of cmds) statuses.push({ ref: c.ref, ok: false, msg: `unpack-failed` });
     } else {
-      for (const c of cmds) {
-        const cur = refMap.get(c.ref);
-        const isZeroOld = /^0{40}$/i.test(c.oldOid);
-        const isZeroNew = /^0{40}$/i.test(c.newOid);
-        // Delete ref
-        if (isZeroNew) {
-          if (!cur) {
-            statuses.push({ ref: c.ref, ok: false, msg: `no such ref` });
-            continue;
-          }
-          if (cur.toLowerCase() !== c.oldOid.toLowerCase()) {
-            statuses.push({ ref: c.ref, ok: false, msg: `stale old-oid` });
-            continue;
-          }
-          statuses.push({ ref: c.ref, ok: true });
-          continue;
-        }
-        // Create new ref
-        if (!cur) {
-          if (!isZeroOld) {
-            statuses.push({ ref: c.ref, ok: false, msg: `expected zero old-oid` });
-            continue;
-          }
-          statuses.push({ ref: c.ref, ok: true });
-          continue;
-        }
-        // Update existing ref: require old matches current; allow non-fast-forward (force)
-        if (cur.toLowerCase() !== c.oldOid.toLowerCase()) {
-          statuses.push({ ref: c.ref, ok: false, msg: `stale old-oid` });
-          continue;
-        }
-        statuses.push({ ref: c.ref, ok: true });
-      }
+      statuses.push(...validateReceiveCommands(refs, cmds));
     }
 
     // Connectivity check: ensure each new ref's target exists (commit->tree, tag, tree/blob)
@@ -479,12 +426,7 @@ export async function receivePack(
     });
     let newRefs: { name: string; oid: string }[] | undefined = undefined;
     if (allOk) {
-      for (let i = 0; i < cmds.length; i++) {
-        const c = cmds[i];
-        if (/^0{40}$/i.test(c.newOid)) refMap.delete(c.ref);
-        else refMap.set(c.ref, c.newOid);
-      }
-      newRefs = Array.from(refMap, ([name, oid]) => ({ name, oid }));
+      newRefs = applyReceiveCommands(refs, cmds);
       try {
         await store.put("refs", newRefs);
         log.info("refs:updated", { count: newRefs.length });

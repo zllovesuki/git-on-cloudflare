@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { safeReadJson } from "@/client/json.ts";
 import { isJsonObject, type JsonValue } from "@/web";
-import type { RepoStorageModeMutationResult } from "./types";
+import type { RepoStorageMode, RepoStorageModeMutationResult } from "./types";
 
 export function useRepoAdminActions(owner: string, repo: string) {
   const [compactionResult, setCompactionResult] = useState<JsonValue | null>(null);
   const [storageModeResult, setStorageModeResult] = useState<RepoStorageModeMutationResult | null>(
     null
   );
+  const [backfillResult, setBackfillResult] = useState<JsonValue | null>(null);
   const [oidResult, setOidResult] = useState<JsonValue | null>(null);
   const [stateDump, setStateDump] = useState<JsonValue | null>(null);
   const [pending, setPending] = useState<Record<string, boolean>>({});
@@ -29,7 +30,7 @@ export function useRepoAdminActions(owner: string, repo: string) {
     }
   }
 
-  async function setStorageMode(mode: "legacy" | "shadow-read") {
+  async function setStorageMode(mode: RepoStorageMode) {
     await runAction(`storage-mode:${mode}`, async () => {
       const response = await fetch(`/${owner}/${repo}/admin/storage-mode`, {
         method: "PUT",
@@ -40,6 +41,19 @@ export function useRepoAdminActions(owner: string, repo: string) {
       setStorageModeResult(data);
       if (response.ok) {
         window.setTimeout(() => window.location.reload(), 1200);
+      }
+    });
+  }
+
+  async function requestLegacyCompatBackfill() {
+    await runAction("storage-mode:backfill", async () => {
+      const response = await fetch(`/${owner}/${repo}/admin/storage-mode/backfill`, {
+        method: "POST",
+      });
+      const data = await safeReadJson(response);
+      setBackfillResult(data);
+      if (response.ok) {
+        window.setTimeout(() => window.location.reload(), 1500);
       }
     });
   }
@@ -157,10 +171,12 @@ export function useRepoAdminActions(owner: string, repo: string) {
   return {
     compactionResult,
     storageModeResult,
+    backfillResult,
     oidResult,
     stateDump,
     pending,
     setStorageMode,
+    requestLegacyCompatBackfill,
     startCompaction,
     clearCompaction,
     removePack,

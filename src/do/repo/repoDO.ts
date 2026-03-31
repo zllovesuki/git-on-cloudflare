@@ -34,6 +34,14 @@ import {
   beginCompactionLease,
   beginReceiveLease,
   clearExpiredLeases,
+  completeLegacyCompatBackfillState,
+  failLegacyCompatBackfillState,
+  finalizeReceiveState,
+  type LegacyCompatBackfillBatch,
+  type LegacyCompatBackfillCursor,
+  requestLegacyCompatBackfillState,
+  beginLegacyCompatBackfillState,
+  storeLegacyCompatBatchState,
   getActivePackCatalogSnapshot,
   getRepoActivitySnapshot,
   getRepoStorageModeControl,
@@ -77,7 +85,6 @@ import { seedMinimalRepoState } from "./repoDO/seeding.ts";
  * - Acts as the strongly consistent source of truth for repository metadata
  * - Stores refs, HEAD, rollout mode, and pack catalog state in DO storage/SQLite
  * - Keeps loose-object state only for compatibility and rollback helpers during rollout
- * - Writes received packfiles to R2 under `do/<id>/objects/pack/*.pack` (and `.idx`)
  * - Exposes focused internal HTTP endpoints:
  *   - `POST /receive` — current receive-pack implementation (delegates to git/operations/receive.ts)
  * - All other operations are provided as typed RPC methods on the class.
@@ -90,9 +97,11 @@ import { seedMinimalRepoState } from "./repoDO/seeding.ts";
  *
  * Write Path
  * - Loose object writes: DO storage first, then mirror to R2 via `r2LooseKey()`.
- * - The current `POST /receive` path still buffers the request body, stores the raw `.pack` to R2,
+ * - Streaming receive writes staged `.pack` and `.idx` data from the Worker, then commits refs and
+ *   pack-catalog metadata through typed DO RPCs.
+ * - The legacy `POST /receive` path still buffers the request body, stores the raw `.pack` to R2,
  *   performs a fast index-only step to produce `.idx`, and then queues asynchronous unpack work.
- *   That legacy compatibility path remains in place until the streaming receive cutover lands.
+ *   That compatibility path remains in place for `legacy` and `shadow-read` repos.
  *
  * Maintenance & Background Work
  * - `alarm()` combines three duties:
@@ -280,6 +289,28 @@ export class RepoDurableObject extends DurableObject {
     return await abortReceiveLease(this.ctx, token);
   }
 
+  public async finalizeReceive(args: {
+    token: string;
+    commands: Array<{ oldOid: string; newOid: string; ref: string }>;
+    stagedPack?:
+      | {
+          packKey: string;
+          packBytes: number;
+          idxBytes: number;
+          objectCount: number;
+        }
+      | undefined;
+  }) {
+    await this.ensureAccessAndAlarm();
+    return await finalizeReceiveState({
+      ctx: this.ctx,
+      token: args.token,
+      commands: args.commands,
+      stagedPack: args.stagedPack,
+      logger: this.logger,
+    });
+  }
+
   public async beginCompaction() {
     await this.ensureAccessAndAlarm();
     return await beginCompactionLease(this.ctx, this.env, this.prefix(), this.logger);
@@ -288,6 +319,65 @@ export class RepoDurableObject extends DurableObject {
   public async abortCompaction(token: string): Promise<boolean> {
     await this.ensureAccessAndAlarm();
     return await abortCompactionLease(this.ctx, token);
+  }
+
+  public async requestLegacyCompatBackfill() {
+    await this.ensureAccessAndAlarm();
+    return await requestLegacyCompatBackfillState(this.ctx, this.logger);
+  }
+
+  public async beginLegacyCompatBackfill(jobId: string, targetPacksetVersion: number) {
+    await this.ensureAccessAndAlarm();
+    return await beginLegacyCompatBackfillState({
+      ctx: this.ctx,
+      env: this.env,
+      prefix: this.prefix(),
+      jobId,
+      targetPacksetVersion,
+      logger: this.logger,
+    });
+  }
+
+  public async storeLegacyCompatBatch(args: {
+    jobId: string;
+    targetPacksetVersion: number;
+    batch: LegacyCompatBackfillBatch;
+    nextProgress: LegacyCompatBackfillCursor;
+  }) {
+    await this.ensureAccessAndAlarm();
+    return await storeLegacyCompatBatchState({
+      ctx: this.ctx,
+      jobId: args.jobId,
+      targetPacksetVersion: args.targetPacksetVersion,
+      batch: args.batch,
+      nextProgress: args.nextProgress,
+      logger: this.logger,
+    });
+  }
+
+  public async completeLegacyCompatBackfill(jobId: string, targetPacksetVersion: number) {
+    await this.ensureAccessAndAlarm();
+    return await completeLegacyCompatBackfillState({
+      ctx: this.ctx,
+      jobId,
+      targetPacksetVersion,
+      logger: this.logger,
+    });
+  }
+
+  public async failLegacyCompatBackfill(
+    jobId: string,
+    targetPacksetVersion: number,
+    error: string
+  ): Promise<void> {
+    await this.ensureAccessAndAlarm();
+    await failLegacyCompatBackfillState({
+      ctx: this.ctx,
+      jobId,
+      targetPacksetVersion,
+      error,
+      logger: this.logger,
+    });
   }
 
   public async getUnpackProgress(): Promise<UnpackProgress> {

@@ -38,10 +38,12 @@ export function RepoAdminIsland(props: RepoAdminProps) {
   const {
     compactionResult,
     storageModeResult,
+    backfillResult,
     oidResult,
     stateDump,
     pending,
     setStorageMode,
+    requestLegacyCompatBackfill,
     startCompaction,
     clearCompaction,
     removePack,
@@ -82,8 +84,10 @@ export function RepoAdminIsland(props: RepoAdminProps) {
       <StorageModeCard
         control={storageModeControl}
         result={storageModeResult}
+        backfillResult={backfillResult}
         pending={pending}
         setStorageMode={setStorageMode}
+        requestLegacyCompatBackfill={requestLegacyCompatBackfill}
       />
 
       <HydrationCard

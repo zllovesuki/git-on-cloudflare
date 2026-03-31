@@ -82,9 +82,8 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     return json({ owner, repos });
   });
 
-  // Compatibility aliases during the streaming-push rollout. The admin UI now
-  // previews or queues compaction requests, while /hydrate remains wired to the
-  // same semantics until the rollback window closes.
+  // Both /hydrate and /compact resolve to the same compaction handler.
+  // The /hydrate alias is preserved for backward compatibility with existing tooling.
   router.delete(`/:owner/:repo/admin/hydrate`, handleCompatCompactionDelete);
   router.post(`/:owner/:repo/admin/hydrate`, handleCompatCompactionPost);
   router.delete(`/:owner/:repo/admin/compact`, handleCompatCompactionDelete);
@@ -235,6 +234,32 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
       const status =
         result.status === "ok" ? 200 : result.status === "unsupported_target_mode" ? 400 : 409;
       return json(result, status, { "Cache-Control": "no-cache" });
+    } catch (error) {
+      return json({ error: String(error) }, 500);
+    }
+  });
+
+  router.post(`/:owner/:repo/admin/storage-mode/backfill`, async (request, env: Env) => {
+    const { owner, repo } = request.params as { owner: string; repo: string };
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return unauthorizedAdminBasic();
+    }
+
+    const repoId = repoKey(owner, repo);
+    const stub = getRepoStub(env, repoId);
+    try {
+      const result = await stub.requestLegacyCompatBackfill();
+      if (result.status === "queued" && result.shouldEnqueue) {
+        await env.REPO_MAINT_QUEUE.send({
+          kind: "legacy-backfill",
+          repoId,
+          jobId: result.jobId,
+          targetPacksetVersion: result.targetPacksetVersion,
+        });
+      }
+      return json(result, result.status === "queued" ? 202 : 200, {
+        "Cache-Control": "no-cache",
+      });
     } catch (error) {
       return json({ error: String(error) }, 500);
     }
