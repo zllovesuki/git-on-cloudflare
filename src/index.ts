@@ -4,6 +4,7 @@ import { registerGitRoutes } from "./routes/git";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerUiRoutes } from "./routes/ui";
 import { registerAuthRoutes } from "./routes/auth";
+import { handleRepoMaintenanceQueue, type RepoMaintenanceQueueMessage } from "./maintenance/queue";
 
 // Router setup with itty-router AutoRouter
 const router = AutoRouter();
@@ -50,6 +51,9 @@ router.all("*", async (_request, env: Env) => {
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
     return router.fetch(request, env, ctx);
+  },
+  async queue(batch: MessageBatch<RepoMaintenanceQueueMessage>, env: Env, ctx: ExecutionContext) {
+    return await handleRepoMaintenanceQueue(batch, env, ctx);
   },
 };
 

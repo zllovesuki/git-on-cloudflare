@@ -15,6 +15,10 @@ export function text(body: string, status = 200, headers: HeadersInit = {}) {
   return new Response(body, { status, headers: h });
 }
 
+export function clientAbortedResponse(headers: HeadersInit = {}): Response {
+  return text("client aborted\n", 499, headers);
+}
+
 /**
  * Extract a Bearer token from the Authorization header.
  * Returns an empty string when missing or malformed.

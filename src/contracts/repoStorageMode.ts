@@ -1,56 +1,56 @@
-export type GuardedRepoStorageMode = "legacy" | "shadow-read";
+import { RepoStorageMode } from "@/do/repo/repoState";
+export { RepoStorageMode };
 
-export type RepoStorageModeControl =
-  | {
-      status: "ok";
-      currentMode: GuardedRepoStorageMode;
-      canChange: boolean;
-      allowedModes: GuardedRepoStorageMode[];
-      activePackCount: number;
-      receiveActive: boolean;
-      compactionActive: boolean;
-      blockers: string[];
-      message?: string;
-    }
-  | {
-      status: "unsupported_current_mode";
-      currentMode: "streaming";
-      canChange: false;
-      allowedModes: GuardedRepoStorageMode[];
-      activePackCount: number;
-      receiveActive: boolean;
-      compactionActive: boolean;
-      blockers: string[];
-      message: string;
-    };
+export type RollbackCompatStatus =
+  | "not_requested"
+  | "queued"
+  | "running"
+  | "ready"
+  | "stale"
+  | "failed";
+
+export type RollbackCompatControl = {
+  status: RollbackCompatStatus;
+  currentPacksetVersion: number;
+  targetPacksetVersion?: number;
+  requestedAt?: number;
+  startedAt?: number;
+  completedAt?: number;
+  error?: string;
+  message?: string;
+};
+
+export type RepoStorageModeControl = {
+  status: "ok";
+  currentMode: RepoStorageMode;
+  canChange: boolean;
+  allowedModes: RepoStorageMode[];
+  activePackCount: number;
+  receiveActive: boolean;
+  compactionActive: boolean;
+  blockers: string[];
+  rollbackCompat: RollbackCompatControl;
+  message?: string;
+};
 
 export type RepoStorageModeMutationResult =
   | {
       status: "ok";
       changed: boolean;
-      previousMode: GuardedRepoStorageMode;
-      currentMode: GuardedRepoStorageMode;
-      message: string;
-      control: Extract<RepoStorageModeControl, { status: "ok" }>;
-    }
-  | {
-      status: "unsupported_current_mode";
-      currentMode: "streaming";
-      targetMode: string;
-      message: string;
-      control: Extract<RepoStorageModeControl, { status: "unsupported_current_mode" }>;
-    }
-  | {
-      status: "unsupported_target_mode";
-      currentMode: string;
-      targetMode: string;
+      previousMode: RepoStorageMode;
+      currentMode: RepoStorageMode;
       message: string;
       control: RepoStorageModeControl;
     }
   | {
-      status: "repo_busy" | "no_active_packs";
-      currentMode: GuardedRepoStorageMode;
-      targetMode: GuardedRepoStorageMode;
+      status:
+        | "unsupported_target_mode"
+        | "unsupported_transition"
+        | "repo_busy"
+        | "no_active_packs"
+        | "rollback_backfill_required";
+      currentMode: RepoStorageMode;
+      targetMode: string;
       message: string;
-      control: Extract<RepoStorageModeControl, { status: "ok" }>;
+      control: RepoStorageModeControl;
     };

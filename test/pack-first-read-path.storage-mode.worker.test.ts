@@ -130,7 +130,7 @@ describe("pack-first read path storage mode", () => {
     expect(setJson.status).toBe("ok");
     expect(setJson.changed).toBe(true);
     expect(setJson.currentMode).toBe("shadow-read");
-    expect(setJson.message).toContain("validation is now enabled");
+    expect(setJson.message).toContain("now shadow-read");
 
     expect(await callStubWithRetry(seeded.getStub, (stub) => stub.getRepoStorageMode())).toBe(
       "shadow-read"
@@ -152,7 +152,7 @@ describe("pack-first read path storage mode", () => {
     };
     expect(resetJson.status).toBe("ok");
     expect(resetJson.currentMode).toBe("legacy");
-    expect(resetJson.message).toContain("validation is now disabled");
+    expect(resetJson.message).toContain("now legacy");
   });
 
   it("keeps pack-first reads stable while storage mode only toggles validation", async () => {
@@ -218,7 +218,7 @@ describe("pack-first read path storage mode", () => {
     expect(getJson.activePackCount).toBe(0);
     expect(getJson.canChange).toBe(false);
     expect(getJson.blockers).toContain(
-      "Packed reads validation requires at least one active pack."
+      "At least one active pack is required before enabling packed-read validation."
     );
 
     const setResponse = await SELF.fetch(
@@ -235,13 +235,15 @@ describe("pack-first read path storage mode", () => {
       message?: string;
     };
     expect(setJson.status).toBe("no_active_packs");
-    expect(setJson.message).toContain("at least one active pack");
+    expect(setJson.message).toContain("At least one active pack");
 
     const adminResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin`);
     expect(adminResponse.status).toBe(200);
     const adminHtml = await adminResponse.text();
-    expect(adminHtml).toContain("Packed Read Validation");
-    expect(adminHtml).toContain("Packed reads validation requires at least one active pack.");
+    expect(adminHtml).toContain("Storage Mode");
+    expect(adminHtml).toContain(
+      "At least one active pack is required before enabling packed-read validation."
+    );
   });
 
   it("blocks storage mode changes while a receive lease is active", async () => {
@@ -298,7 +300,7 @@ describe("pack-first read path storage mode", () => {
     expect(payload.message).toContain("cannot change");
   });
 
-  it("rejects selecting an unsupported storage mode from the admin route", async () => {
+  it("requires passing through shadow-read before enabling streaming receive", async () => {
     const owner = "o";
     const repo = uniqueRepoId("storage-mode-unsupported-target");
     const repoId = `${owner}/${repo}`;
@@ -309,14 +311,14 @@ describe("pack-first read path storage mode", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: "streaming" }),
     });
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(409);
     const payload = (await response.json()) as {
       status?: string;
       message?: string;
       targetMode?: string;
     };
-    expect(payload.status).toBe("unsupported_target_mode");
+    expect(payload.status).toBe("unsupported_transition");
     expect(payload.targetMode).toBe("streaming");
-    expect(payload.message).toContain("legacy and shadow-read");
+    expect(payload.message).toContain("Enable shadow-read first");
   });
 });

@@ -1,4 +1,6 @@
 import type {
+  RollbackCompatControl,
+  RepoStorageMode,
   RepoStorageModeControl,
   RepoStorageModeMutationResult,
 } from "@/contracts/repoStorageMode.ts";
@@ -25,8 +27,12 @@ export type CompactionData = {
   wantedAt?: number;
 };
 
-export type { GuardedRepoStorageMode } from "@/contracts/repoStorageMode.ts";
-export type { RepoStorageModeControl, RepoStorageModeMutationResult };
+export type {
+  RepoStorageMode,
+  RepoStorageModeControl,
+  RepoStorageModeMutationResult,
+  RollbackCompatControl,
+};
 
 export type AdminState = {
   packStats?: PackStat[];
@@ -40,6 +46,7 @@ export type AdminState = {
     expiresAt: number;
   };
   compaction?: CompactionData;
+  rollbackCompat?: RollbackCompatControl;
   looseR2SampleBytes?: number;
   looseR2SampleCount?: number;
   looseR2Truncated?: boolean;

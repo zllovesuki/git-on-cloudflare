@@ -1,4 +1,4 @@
-import { asBodyInit } from "@/common/index.ts";
+import { asBodyInit, clientAbortedResponse } from "@/common/index.ts";
 import { pktLine, delimPkt, flushPkt, concatChunks } from "@/git/core/index.ts";
 
 /**
@@ -62,7 +62,7 @@ export function respondWithPacketizedPack(
   ackOids: string[],
   signal?: AbortSignal
 ): Response {
-  if (signal?.aborted) return new Response("client aborted\n", { status: 499 });
+  if (signal?.aborted) return clientAbortedResponse();
 
   const chunks: Uint8Array[] = [];
 
@@ -83,7 +83,7 @@ export function respondWithPacketizedPack(
 
   const maxChunk = 65515;
   for (let off = 0; off < packfile.byteLength; off += maxChunk) {
-    if (signal?.aborted) return new Response("client aborted\n", { status: 499 });
+    if (signal?.aborted) return clientAbortedResponse();
     const slice = packfile.subarray(off, Math.min(off + maxChunk, packfile.byteLength));
     const banded = new Uint8Array(1 + slice.byteLength);
     banded[0] = 0x01;

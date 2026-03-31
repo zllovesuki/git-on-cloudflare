@@ -32,12 +32,12 @@ export function RepoOverviewCard({
 }: RepoOverviewCardProps) {
   const [copiedDoId, setCopiedDoId] = useState(false);
   const activePackCount = Array.isArray(state.activePacks) ? state.activePacks.length : packCount;
-  const validationMode =
+  const storageModeLabel =
     state.repoStorageMode === "shadow-read"
-      ? "shadow-read (on)"
+      ? "shadow-read"
       : state.repoStorageMode === "streaming"
         ? "streaming"
-        : "legacy (off)";
+        : "legacy";
 
   async function copyDoId(doId: string) {
     try {
@@ -126,9 +126,9 @@ export function RepoOverviewCard({
         ) : null}
         <div>
           <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Read Validation
+            Storage Mode
           </div>
-          <div className="font-mono text-sm">{validationMode}</div>
+          <div className="font-mono text-sm">{storageModeLabel}</div>
         </div>
         <div>
           <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">

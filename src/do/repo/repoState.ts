@@ -1,16 +1,31 @@
 // Typed schema for Repo Durable Object storage
 // Provides a light wrapper to get strong typing on storage keys/values in tests and code.
 
+export type RepoStorageMode = "legacy" | "shadow-read" | "streaming";
+
 export type ObjKey = `obj:${string}`;
 export type PackOidsKey = `packOids:${string}`;
 
 export type Ref = { name: string; oid: string };
 export type Head = { target: string; oid?: string; unborn?: boolean };
-export type RepoStorageMode = "legacy" | "shadow-read" | "streaming";
 export type RepoLease = {
   token: string;
   createdAt: number;
   expiresAt: number;
+};
+
+export type LegacyCompatBackfillState = {
+  jobId: string;
+  status: "queued" | "running" | "ready" | "failed";
+  targetPacksetVersion: number;
+  requestedAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  error?: string;
+  progress?: {
+    packIndex: number;
+    objectIndex: number;
+  };
 };
 
 export type UnpackWork = {
@@ -73,6 +88,7 @@ export type RepoStateSchema = {
   compactLease: RepoLease | undefined;
   compactionWantedAt: number | undefined;
   repoStorageMode: RepoStorageMode | undefined;
+  legacyCompatBackfill: LegacyCompatBackfillState | undefined;
   lastPackKey: string;
   lastPackOids: string[];
   packList: string[];

@@ -12,11 +12,26 @@ import {
   parseTagTarget,
 } from "@/git";
 import { handleFetchV2Streaming } from "@/git/operations/uploadStream/index.ts";
+import { handleStreamingReceivePackPOST } from "@/git/receive/streamReceivePack.ts";
 import { asBodyInit, getRepoStub, gunzip, unauthorizedBasic } from "@/common";
 import { repoKey } from "@/keys";
 import { verifyAuth } from "@/auth";
 import { addRepoToOwner, removeRepoFromOwner } from "@/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/cache";
+
+async function applyReceiveSideEffects(env: Env, repoId: string, headers: Headers): Promise<void> {
+  try {
+    const changed = headers.get("X-Repo-Changed") === "1";
+    if (!changed) return;
+
+    const empty = headers.get("X-Repo-Empty") === "1";
+    const [owner, repo] = repoId.split("/", 2);
+    if (!owner || !repo) return;
+
+    if (empty) await removeRepoFromOwner(env, owner, repo);
+    else await addRepoToOwner(env, owner, repo);
+  } catch {}
+}
 
 async function decodeUploadPackBody(request: Request): Promise<Uint8Array | Response> {
   const rawBody = new Uint8Array(await request.arrayBuffer());
@@ -187,9 +202,22 @@ async function handleUploadPackPOST(
  * @param request - Incoming HTTP request with push data
  * @returns Response with receive-pack result
  */
-async function handleReceivePackPOST(env: Env, repoId: string, request: Request) {
-  // Forward raw body to the Durable Object /receive endpoint
+async function handleReceivePackPOST(
+  env: Env,
+  repoId: string,
+  request: Request,
+  ctx: ExecutionContext
+) {
   const stub = getRepoStub(env, repoId);
+  const repoStorageMode = await stub.getRepoStorageMode().catch(() => "legacy");
+
+  if (repoStorageMode === "streaming") {
+    const response = await handleStreamingReceivePackPOST(env, repoId, request, ctx);
+    await applyReceiveSideEffects(env, repoId, response.headers);
+    return response;
+  }
+
+  // Forward raw body to the Durable Object /receive endpoint
   // Preflight: if the DO is currently unpacking and a one-deep queue is already occupied,
   // return 503 early so clients can retry without uploading the whole pack.
   try {
@@ -218,17 +246,7 @@ async function handleReceivePackPOST(env: Env, repoId: string, request: Request)
     headers.set("Content-Type", "application/x-git-receive-pack-result");
   headers.set("Cache-Control", "no-cache");
   // Update owner registry on change signal
-  try {
-    const changed = res.headers.get("X-Repo-Changed") === "1";
-    if (changed) {
-      const empty = res.headers.get("X-Repo-Empty") === "1";
-      const [owner, repo] = repoId.split("/", 2);
-      if (owner && repo) {
-        if (empty) await removeRepoFromOwner(env, owner, repo);
-        else await addRepoToOwner(env, owner, repo);
-      }
-    }
-  } catch {}
+  await applyReceiveSideEffects(env, repoId, headers);
   return new Response(res.body, { status: res.status, headers });
 }
 
@@ -256,11 +274,14 @@ export function registerGitRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // git-receive-pack (POST)
-  router.post(`/:owner/:repo/git-receive-pack`, async (request, env: Env) => {
-    const { owner, repo } = request.params;
-    if (!(await verifyAuth(env, owner, request, false))) {
-      return unauthorizedBasic();
+  router.post(
+    `/:owner/:repo/git-receive-pack`,
+    async (request, env: Env, ctx: ExecutionContext) => {
+      const { owner, repo } = request.params;
+      if (!(await verifyAuth(env, owner, request, false))) {
+        return unauthorizedBasic();
+      }
+      return handleReceivePackPOST(env, repoKey(owner, repo), request, ctx);
     }
-    return handleReceivePackPOST(env, repoKey(owner, repo), request);
-  });
+  );
 }

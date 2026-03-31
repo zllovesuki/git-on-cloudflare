@@ -136,7 +136,7 @@ These are the platform facts the design relies on:
 - R2 `get()` supports ranged reads by `offset` and `length`.
 - R2 multipart uploads exist, but require 5 MiB parts except the last part.
 
-The design deliberately does not use Worker-to-R2 multipart upload in the initial rollout because it adds state management and part assembly complexity with no material benefit for the 40 MB target pack.
+The receive path prefers a single Worker-to-R2 `put()` when the pack length is known ahead of time. When the incoming Git client uses chunked transfer and the pack length is not knowable up front, the receive path falls back to Worker-to-R2 multipart upload with fixed-size parts.
 
 ## New Metadata Model
 
@@ -197,11 +197,14 @@ This is repo-local, not an env var. It keeps rollout state explicit while the re
 
 Admin control surface rules:
 
-- the admin UI and admin endpoint only expose `legacy` and `shadow-read` while streaming receive is not yet implemented;
+- the admin UI and admin endpoint expose `legacy`, `shadow-read`, and `streaming` once worker-local streaming receive is implemented;
 - both `legacy` and `shadow-read` keep fetch/UI reads on the same pack-first Worker path;
 - `legacy` disables packed-vs-compatibility validation;
 - `shadow-read` enables packed-vs-compatibility validation;
 - `legacy -> shadow-read` requires at least one active pack in `pack_catalog`;
+- `legacy -> streaming` is rejected; canary rollout moves one step at a time through `shadow-read`;
+- `shadow-read -> streaming` requires at least one active pack in `pack_catalog`;
+- `streaming -> legacy|shadow-read` requires rollback compatibility data prepared for the current `packsetVersion`;
 - `shadow-read -> legacy` is the fast way to disable validation if canary noise appears;
 - mode changes are blocked while a receive lease or compaction lease is active.
 
@@ -711,6 +714,12 @@ The emergency backfill tool must:
 3. repopulate legacy `obj:*` and `pack_objects`;
 4. leave new pack data untouched.
 
+Operational notes:
+
+- the trigger is a separate admin endpoint so storage-mode updates stay pure;
+- the backfill state is keyed to the current `packsetVersion`, so a later streaming push or compaction makes older rollback data stale;
+- queue-driven worker slices are allowed here even though compaction remains deferred.
+
 This tool is intentionally admin-only and only needed during phase-3 canaries.
 
 ## Compatibility Surface
@@ -798,23 +807,34 @@ Add a small storage-mode control endpoint:
 
 - `GET /:owner/:repo/admin/storage-mode`
 - `PUT /:owner/:repo/admin/storage-mode`
+- `POST /:owner/:repo/admin/storage-mode/backfill`
 
-`PUT` accepts only:
+`PUT` accepts:
 
 - `legacy`
 - `shadow-read`
+- `streaming`
 
-Mode meaning during the read-path rollout:
+Mode meaning during the streaming-receive rollout:
 
 - `legacy`: packed reads remain authoritative and validation is disabled
 - `shadow-read`: the same packed reads remain authoritative and are validated against compatibility reads
+- `streaming`: packed reads remain authoritative and pushes stream directly into staged R2 packs before DO metadata commit
+
+`POST /admin/storage-mode/backfill`:
+
+- is admin-only;
+- queues rollback compatibility preparation for the current `packsetVersion`;
+- does not change storage mode by itself;
+- backfills `obj:*` and `pack_objects` additively, without deleting any pack data.
 
 It must reject:
 
-- `streaming`
 - mode changes while a receive lease is active
 - mode changes while a compaction lease is active
 - `legacy -> shadow-read` when the repo still has zero active packs
+- `legacy -> streaming`
+- `streaming -> legacy|shadow-read` when rollback compatibility data is missing or stale for the current `packsetVersion`
 
 Do not remove the `/hydrate` routes until the admin UI has been migrated and the rollback window has closed.
 
@@ -1012,14 +1032,15 @@ Not done until:
 
 Deliverables:
 
-- replace DO `/receive` forwarding with worker-local streaming receive;
+- keep the DO `/receive` path as compatibility for `legacy` and `shadow-read`, and use worker-local streaming receive for `repoStorageMode = streaming`;
 - add receive lease RPCs;
 - implement staged R2 write, new indexer, thin-pack validation, connectivity checks, and DO finalization;
 - keep `packList` and `lastPackKey` mirrored for rollback;
-- add emergency legacy backfill tool for canary rollback.
+- add emergency legacy backfill tooling plus a separate admin trigger for canary rollback.
 
 Migration work:
 
+- selected repos move `legacy -> shadow-read -> streaming`;
 - enable `repoStorageMode = streaming` only for canary repos that already have at least one active pack;
 - loose-only repos must complete one-time pack migration first.
 - phase 3 is canary-only; broad rollout is blocked on phase 4 compaction.

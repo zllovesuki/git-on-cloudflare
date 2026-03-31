@@ -1,25 +1,39 @@
 import type {
-  GuardedRepoStorageMode,
+  RepoStorageMode,
   RepoStorageModeControl,
   RepoStorageModeMutationResult,
 } from "@/contracts/repoStorageMode.ts";
 import type { Logger } from "@/common/logger.ts";
-import type { RepoStorageMode, RepoStateSchema } from "../repoState.ts";
+import type { RepoStateSchema } from "../repoState.ts";
 
 import { asTypedStorage } from "../repoState.ts";
 import { getActivePackCatalogSnapshot } from "./state.ts";
 import { activeLeaseOrUndefined } from "./activity.ts";
-import { ensureRepoMetadataDefaults, GUARDED_REPO_STORAGE_MODES } from "./shared.ts";
+import { getRollbackCompatControlFromStore } from "./legacyCompat.ts";
+import { ensureRepoMetadataDefaults } from "./shared.ts";
 
-function isGuardedRepoStorageMode(mode: string): mode is GuardedRepoStorageMode {
-  return mode === "legacy" || mode === "shadow-read";
+const ALL_REPO_STORAGE_MODES: RepoStorageMode[] = ["legacy", "shadow-read", "streaming"];
+
+function isRepoStorageMode(mode: string): mode is RepoStorageMode {
+  return mode === "legacy" || mode === "shadow-read" || mode === "streaming";
+}
+
+function buildModeMessage(mode: RepoStorageMode): string {
+  if (mode === "legacy") {
+    return "Pack-first reads remain authoritative and compatibility validation is disabled.";
+  }
+  if (mode === "shadow-read") {
+    return "Pack-first reads remain authoritative and are validated against compatibility reads.";
+  }
+  return "Pushes stream directly into R2 packs. Leaving this mode requires prepared rollback compatibility data.";
 }
 
 function buildRepoStorageModeBlockers(args: {
-  currentMode: GuardedRepoStorageMode;
+  currentMode: RepoStorageMode;
   activePackCount: number;
   receiveLease?: { createdAt: number; expiresAt: number; token: string };
   compactLease?: { createdAt: number; expiresAt: number; token: string };
+  rollbackCompat: RepoStorageModeControl["rollbackCompat"];
 }): string[] {
   const blockers: string[] = [];
   if (args.receiveLease) {
@@ -28,10 +42,48 @@ function buildRepoStorageModeBlockers(args: {
   if (args.compactLease) {
     blockers.push("Pack compaction is currently updating repository metadata.");
   }
+
   if (args.currentMode === "legacy" && args.activePackCount === 0) {
-    blockers.push("Packed reads validation requires at least one active pack.");
+    blockers.push("At least one active pack is required before enabling packed-read validation.");
   }
+  if (args.currentMode === "shadow-read" && args.activePackCount === 0) {
+    blockers.push("At least one active pack is required before enabling streaming receive.");
+  }
+  if (args.currentMode === "streaming" && args.rollbackCompat.status !== "ready") {
+    blockers.push(
+      args.rollbackCompat.message ||
+        "Rollback compatibility data must be prepared before leaving streaming mode."
+    );
+  }
+
   return blockers;
+}
+
+function canTransition(args: {
+  currentMode: RepoStorageMode;
+  targetMode: RepoStorageMode;
+  activePackCount: number;
+  receiveActive: boolean;
+  compactionActive: boolean;
+  rollbackCompat: RepoStorageModeControl["rollbackCompat"];
+}): boolean {
+  if (args.currentMode === args.targetMode) return true;
+  if (args.receiveActive || args.compactionActive) return false;
+
+  if (args.currentMode === "legacy") {
+    if (args.targetMode === "shadow-read") return args.activePackCount > 0;
+    return false;
+  }
+  if (args.currentMode === "shadow-read") {
+    if (args.targetMode === "legacy") return true;
+    if (args.targetMode === "streaming") return args.activePackCount > 0;
+    return false;
+  }
+
+  return (
+    (args.targetMode === "legacy" || args.targetMode === "shadow-read") &&
+    args.rollbackCompat.status === "ready"
+  );
 }
 
 function buildRepoStorageModeControlSnapshot(args: {
@@ -39,45 +91,36 @@ function buildRepoStorageModeControlSnapshot(args: {
   activePackCount: number;
   receiveLease?: { createdAt: number; expiresAt: number; token: string };
   compactLease?: { createdAt: number; expiresAt: number; token: string };
+  rollbackCompat: RepoStorageModeControl["rollbackCompat"];
 }): RepoStorageModeControl {
   const receiveActive = !!args.receiveLease;
   const compactionActive = !!args.compactLease;
-  if (args.currentMode === "streaming") {
-    return {
-      status: "unsupported_current_mode",
-      currentMode: "streaming",
-      canChange: false,
-      allowedModes: GUARDED_REPO_STORAGE_MODES,
-      activePackCount: args.activePackCount,
-      receiveActive,
-      compactionActive,
-      blockers: ["This admin control only manages validation-only legacy and shadow-read modes."],
-      message: "The current storage mode is outside the validation-only admin control.",
-    };
-  }
+  const blockers = buildRepoStorageModeBlockers(args);
 
-  const blockers = buildRepoStorageModeBlockers({
-    currentMode: args.currentMode,
-    activePackCount: args.activePackCount,
-    receiveLease: args.receiveLease,
-    compactLease: args.compactLease,
-  });
-  const canChange =
-    args.currentMode === "legacy" ? blockers.length === 0 : !receiveActive && !compactionActive;
+  const canChange = ALL_REPO_STORAGE_MODES.some((targetMode) =>
+    targetMode !== args.currentMode
+      ? canTransition({
+          currentMode: args.currentMode,
+          targetMode,
+          activePackCount: args.activePackCount,
+          receiveActive,
+          compactionActive,
+          rollbackCompat: args.rollbackCompat,
+        })
+      : false
+  );
 
   return {
     status: "ok",
     currentMode: args.currentMode,
     canChange,
-    allowedModes: GUARDED_REPO_STORAGE_MODES,
+    allowedModes: ALL_REPO_STORAGE_MODES,
     activePackCount: args.activePackCount,
     receiveActive,
     compactionActive,
     blockers,
-    message:
-      args.currentMode === "shadow-read"
-        ? "Packed reads stay authoritative and are validated against compatibility reads."
-        : "Packed reads stay authoritative and packed-read validation is disabled.",
+    rollbackCompat: args.rollbackCompat,
+    message: buildModeMessage(args.currentMode),
   };
 }
 
@@ -93,11 +136,14 @@ export async function getRepoStorageModeControl(
   const now = Date.now();
   const receiveLease = activeLeaseOrUndefined(await store.get("receiveLease"), now);
   const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), now);
+  const rollbackCompat = await getRollbackCompatControlFromStore(store);
+
   return buildRepoStorageModeControlSnapshot({
     currentMode,
     activePackCount: activeCatalog.length,
     receiveLease,
     compactLease,
+    rollbackCompat,
   });
 }
 
@@ -114,31 +160,32 @@ export async function setRepoStorageModeGuarded(
   const now = Date.now();
   const receiveLease = activeLeaseOrUndefined(await store.get("receiveLease"), now);
   const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), now);
+  const rollbackCompat = await getRollbackCompatControlFromStore(store);
   const control = buildRepoStorageModeControlSnapshot({
     currentMode: previousMode,
     activePackCount: activeCatalog.length,
     receiveLease,
     compactLease,
+    rollbackCompat,
   });
 
-  if (control.status === "unsupported_current_mode") {
+  if (!isRepoStorageMode(mode)) {
     return {
-      status: "unsupported_current_mode",
-      currentMode: control.currentMode,
+      status: "unsupported_target_mode",
+      currentMode: previousMode,
       targetMode: mode,
-      message: control.message,
+      message: "Only legacy, shadow-read, and streaming are valid storage modes.",
       control,
     };
   }
 
-  const currentMode = control.currentMode;
-
-  if (!isGuardedRepoStorageMode(mode)) {
+  if (previousMode === mode) {
     return {
-      status: "unsupported_target_mode",
-      currentMode,
-      targetMode: mode,
-      message: "Only legacy and shadow-read can be selected from this validation control.",
+      status: "ok",
+      changed: false,
+      previousMode,
+      currentMode: mode,
+      message: `Repository storage mode is already ${mode}.`,
       control,
     };
   }
@@ -146,7 +193,7 @@ export async function setRepoStorageModeGuarded(
   if (receiveLease || compactLease) {
     return {
       status: "repo_busy",
-      currentMode,
+      currentMode: previousMode,
       targetMode: mode,
       message: "Storage mode cannot change while a push or compaction task is active.",
       control,
@@ -156,55 +203,66 @@ export async function setRepoStorageModeGuarded(
   if (previousMode === "legacy" && mode === "shadow-read" && activeCatalog.length === 0) {
     return {
       status: "no_active_packs",
-      currentMode,
+      currentMode: previousMode,
       targetMode: mode,
-      message: "Packed reads validation requires at least one active pack.",
+      message: "At least one active pack is required before enabling packed-read validation.",
       control,
     };
   }
 
-  if (previousMode === mode) {
+  if (previousMode === "legacy" && mode === "streaming") {
     return {
-      status: "ok",
-      changed: false,
-      previousMode: currentMode,
-      currentMode: mode,
+      status: "unsupported_transition",
+      currentMode: previousMode,
+      targetMode: mode,
+      message: "Enable shadow-read first before switching this repository to streaming receive.",
+      control,
+    };
+  }
+
+  if (previousMode === "shadow-read" && mode === "streaming" && activeCatalog.length === 0) {
+    return {
+      status: "no_active_packs",
+      currentMode: previousMode,
+      targetMode: mode,
+      message: "At least one active pack is required before enabling streaming receive.",
+      control,
+    };
+  }
+
+  if (
+    previousMode === "streaming" &&
+    (mode === "legacy" || mode === "shadow-read") &&
+    rollbackCompat.status !== "ready"
+  ) {
+    return {
+      status: "rollback_backfill_required",
+      currentMode: previousMode,
+      targetMode: mode,
       message:
-        mode === "shadow-read"
-          ? "Packed-read validation was already enabled."
-          : "Packed-read validation was already disabled.",
+        rollbackCompat.message ||
+        "Rollback compatibility data must be prepared before leaving streaming mode.",
       control,
     };
   }
 
   await store.put("repoStorageMode", mode);
   logger?.info("repo-storage-mode:set-guarded", { from: previousMode, to: mode });
+
   const nextControl = buildRepoStorageModeControlSnapshot({
     currentMode: mode,
     activePackCount: activeCatalog.length,
     receiveLease: undefined,
     compactLease: undefined,
+    rollbackCompat,
   });
-
-  if (nextControl.status !== "ok") {
-    return {
-      status: "unsupported_current_mode",
-      currentMode: nextControl.currentMode,
-      targetMode: mode,
-      message: nextControl.message,
-      control: nextControl,
-    };
-  }
 
   return {
     status: "ok",
     changed: true,
-    previousMode: currentMode,
+    previousMode,
     currentMode: mode,
-    message:
-      mode === "shadow-read"
-        ? "Packed-read validation is now enabled."
-        : "Packed-read validation is now disabled.",
+    message: `Repository storage mode is now ${mode}.`,
     control: nextControl,
   };
 }

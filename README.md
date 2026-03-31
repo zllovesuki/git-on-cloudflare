@@ -105,6 +105,16 @@ With auth enabled:
 - Manage tokens at `/auth` or via API
 - Tokens use PBKDF2-SHA256 with 100k iterations
 
+> [!TIP]
+> For local `vite dev` testing, you may want to configure Git credentials up front instead of waiting for an interactive prompt. Miniflare currently has a bug where some backend `401 Unauthorized` responses can surface as a `500`, which prevents Git from prompting as it normally would against a deployed Worker.
+>
+> For example, if your owner is `rachel` and your token is `testtoken`, you can send the `Authorization` header explicitly:
+>
+> ```bash
+> git -c http.extraHeader='Authorization: Basic <base64(rachel:testtoken)>' \
+>   push http://127.0.0.1:5173/rachel/my-repo HEAD:refs/heads/main
+> ```
+
 Admin endpoints for hydration and repository management are protected via owner Basic auth and the admin bearer token for `/auth/api/*`. An admin dashboard is available at `/:owner/:repo/admin`.
 
 ## Configuration

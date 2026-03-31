@@ -1,5 +1,6 @@
 import type { Head, RepoLease } from "../repoState.ts";
 import type { PackCatalogRow } from "../db/schema.ts";
+import type { RollbackCompatControl } from "@/contracts/repoStorageMode.ts";
 
 export type DebugPackState = {
   key: string;
@@ -24,6 +25,8 @@ export type DebugCompactionState = {
   lease?: RepoLease;
 };
 
+export type DebugRollbackCompatState = RollbackCompatControl;
+
 export type DebugStateSnapshot = {
   meta: { doId: string; prefix: string };
   repoStorageMode: string;
@@ -40,6 +43,7 @@ export type DebugStateSnapshot = {
   packCatalogVersion: number;
   receiveLease?: RepoLease;
   compaction: DebugCompactionState;
+  rollbackCompat: DebugRollbackCompatState;
   unpackWork: null;
   unpackNext: null;
   looseSample: string[];
