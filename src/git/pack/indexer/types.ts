@@ -133,6 +133,7 @@ export interface IndexerOptions {
   countSubrequest: (n?: number) => void;
   log: Logger;
   signal?: AbortSignal;
+  onProgress?: (message: string) => void;
 }
 
 export interface ResolveOptions extends IndexerOptions {

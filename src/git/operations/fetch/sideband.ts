@@ -1,5 +1,43 @@
 import { pktLine, flushPkt } from "@/git/core/index.ts";
-import { createLogger } from "@/common/index.ts";
+import type { Logger } from "@/common/logger.ts";
+
+export const SIDEBAND_PAYLOAD_MAX_BYTES = 65_515;
+
+type SidebandEnqueueController = {
+  enqueue(chunk: Uint8Array): void;
+};
+
+export function createSidebandPacketChunks(
+  band: 1 | 2 | 3,
+  payload: Uint8Array,
+  maxChunk: number = SIDEBAND_PAYLOAD_MAX_BYTES
+): Uint8Array[] {
+  const chunks: Uint8Array[] = [];
+  for (let off = 0; off < payload.byteLength; off += maxChunk) {
+    const slice = payload.subarray(off, Math.min(off + maxChunk, payload.byteLength));
+    const banded = new Uint8Array(1 + slice.byteLength);
+    banded[0] = band;
+    banded.set(slice, 1);
+    chunks.push(pktLine(banded));
+  }
+  if (payload.byteLength === 0) {
+    const banded = new Uint8Array(1);
+    banded[0] = band;
+    chunks.push(pktLine(banded));
+  }
+  return chunks;
+}
+
+export function enqueueSidebandPayload(
+  controller: SidebandEnqueueController,
+  band: 1 | 2 | 3,
+  payload: Uint8Array,
+  maxChunk?: number
+): void {
+  for (const chunk of createSidebandPacketChunks(band, payload, maxChunk)) {
+    controller.enqueue(chunk);
+  }
+}
 
 export class SidebandProgressMux {
   private progressMessages: string[] = [];
@@ -60,8 +98,6 @@ export function createSidebandTransform(options?: {
   onProgress?: (msg: string) => void;
   signal?: AbortSignal;
 }): TransformStream<Uint8Array, Uint8Array> {
-  const maxChunk = 65515;
-
   return new TransformStream<Uint8Array, Uint8Array>({
     async transform(chunk, controller) {
       if (options?.signal?.aborted) {
@@ -69,13 +105,7 @@ export function createSidebandTransform(options?: {
         return;
       }
 
-      for (let off = 0; off < chunk.byteLength; off += maxChunk) {
-        const slice = chunk.subarray(off, Math.min(off + maxChunk, chunk.byteLength));
-        const banded = new Uint8Array(1 + slice.byteLength);
-        banded[0] = 0x01;
-        banded.set(slice, 1);
-        controller.enqueue(pktLine(banded));
-      }
+      enqueueSidebandPayload(controller, 1, chunk);
     },
 
     flush(controller) {},
@@ -86,22 +116,14 @@ export function emitProgress(
   controller: ReadableStreamDefaultController<Uint8Array>,
   message: string
 ) {
-  const msg = new TextEncoder().encode(message);
-  const banded = new Uint8Array(1 + msg.byteLength);
-  banded[0] = 0x02;
-  banded.set(msg, 1);
-  controller.enqueue(pktLine(banded));
+  enqueueSidebandPayload(controller, 2, new TextEncoder().encode(message));
 }
 
 export function emitFatal(
   controller: ReadableStreamDefaultController<Uint8Array>,
   message: string
 ) {
-  const msg = new TextEncoder().encode(`fatal: ${message}\n`);
-  const banded = new Uint8Array(1 + msg.byteLength);
-  banded[0] = 0x03;
-  banded.set(msg, 1);
-  controller.enqueue(pktLine(banded));
+  enqueueSidebandPayload(controller, 3, new TextEncoder().encode(`fatal: ${message}\n`));
 }
 
 export async function pipePackWithSideband(
@@ -110,7 +132,7 @@ export async function pipePackWithSideband(
   options: {
     signal?: AbortSignal;
     progressMux: SidebandProgressMux;
-    log: ReturnType<typeof createLogger>;
+    log: Logger;
   }
 ): Promise<void> {
   const { signal, progressMux, log } = options;
