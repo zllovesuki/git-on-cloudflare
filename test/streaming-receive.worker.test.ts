@@ -16,6 +16,8 @@ import {
 import { seedPackFirstRepo } from "./util/pack-first.ts";
 import { doPrefix, r2PackDirPrefix } from "@/keys.ts";
 import {
+  buildStreamingReceiveBody,
+  decodeReceiveSideband,
   decodeReportStatus,
   promoteToStreaming,
   pushStreamingUpdate,
@@ -200,6 +202,90 @@ describe("streaming receive-pack", () => {
     expect(fetchResponse.status).toBe(200);
     const fetchBytes = new Uint8Array(await fetchResponse.arrayBuffer());
     expect(new TextDecoder().decode(fetchBytes.subarray(4, 13))).toBe("packfile\n");
+  });
+
+  it("reports upload, scan, resolve, and final status over side-band-64k", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-receive-sideband");
+    const repoId = `${owner}/${repo}`;
+    const seeded = await seedPackFirstRepo(repoId);
+    await promoteToStreaming(owner, repo);
+
+    const author = "You <you@example.com> 0 +0000";
+    const basePayload = new TextEncoder().encode("version two\n");
+    const suffix = new TextEncoder().encode("sideband progress\n");
+    const delta = buildAppendOnlyDelta(basePayload, suffix);
+    const blobPayload = new Uint8Array(basePayload.byteLength + suffix.byteLength);
+    blobPayload.set(basePayload, 0);
+    blobPayload.set(suffix, basePayload.byteLength);
+    const blobOid = await computeOid("blob", blobPayload);
+    const treePayload = buildTreePayload([{ mode: "100644", name: "README.md", oid: blobOid }]);
+    const tree = await encodeGitObject("tree", treePayload);
+    const commitPayload = new TextEncoder().encode(
+      `tree ${tree.oid}\n` +
+        `parent ${seeded.nextCommit.oid}\n` +
+        `author ${author}\n` +
+        `committer ${author}\n\n` +
+        `sideband progress\n`
+    );
+    const commit = await encodeGitObject("commit", commitPayload);
+    const pack = await buildPack([
+      { type: "ref-delta", baseOid: seeded.nextBlob.oid, delta },
+      { type: "tree", payload: treePayload },
+      { type: "commit", payload: commitPayload },
+    ]);
+
+    const response = await pushBody(
+      `https://example.com/${owner}/${repo}/git-receive-pack`,
+      concatChunks([
+        pktLine(
+          `${seeded.nextCommit.oid} ${commit.oid} refs/heads/main\0 report-status side-band-64k ofs-delta agent=test\n`
+        ),
+        flushPkt(),
+        pack,
+      ]),
+      { stream: true }
+    );
+    expect(response.status).toBe(200);
+
+    const decoded = decodeReceiveSideband(new Uint8Array(await response.arrayBuffer()));
+    expect(decoded.progress.some((line) => line.includes("Uploading pack to object storage"))).toBe(
+      true
+    );
+    expect(decoded.progress.some((line) => line.includes("Scanning pack objects"))).toBe(true);
+    expect(decoded.progress.some((line) => line.includes("Resolving deltas"))).toBe(true);
+    expect(decoded.progress.some((line) => line.includes("Writing pack index"))).toBe(true);
+    expect(decoded.reportStatus).toContain("ok refs/heads/main");
+    expect(decoded.fatal).toEqual([]);
+  });
+
+  it("suppresses side-band progress when the client requests quiet", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-receive-sideband-quiet");
+    const repoId = `${owner}/${repo}`;
+    const seeded = await seedPackFirstRepo(repoId);
+    await promoteToStreaming(owner, repo);
+
+    const push = await buildStreamingReceiveBody({
+      parentOid: seeded.nextCommit.oid,
+      nextText: "quiet progress\n",
+      commitMessage: "quiet progress",
+      capabilities: "report-status side-band-64k quiet ofs-delta agent=test",
+    });
+
+    const response = await pushBody(
+      `https://example.com/${owner}/${repo}/git-receive-pack`,
+      push.body,
+      {
+        stream: true,
+      }
+    );
+    expect(response.status).toBe(200);
+
+    const decoded = decodeReceiveSideband(new Uint8Array(await response.arrayBuffer()));
+    expect(decoded.progress).toEqual([]);
+    expect(decoded.reportStatus).toContain("ok refs/heads/main");
+    expect(decoded.fatal).toEqual([]);
   });
 
   it("handles delete-only pushes in streaming mode", async () => {
@@ -424,6 +510,64 @@ describe("streaming receive-pack", () => {
 
     const retryPush = await pushStreamingUpdate(owner, repo, commit.oid, "cleanup retry\n");
     expect(retryPush.commitOid).not.toBe(commit.oid);
+  });
+
+  it("returns unpack error over side-band-64k when resolve fails after streaming has started", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-receive-sideband-failure");
+    const repoId = `${owner}/${repo}`;
+    const seeded = await seedPackFirstRepo(repoId);
+    await promoteToStreaming(owner, repo);
+
+    const author = "You <you@example.com> 0 +0000";
+    const badTreePayload = buildTreePayload([
+      { mode: "100644", name: "README.md", oid: "ab".repeat(20) },
+    ]);
+    const badTree = await encodeGitObject("tree", badTreePayload);
+    const badCommitPayload = new TextEncoder().encode(
+      `tree ${badTree.oid}\n` +
+        `parent ${seeded.nextCommit.oid}\n` +
+        `author ${author}\n` +
+        `committer ${author}\n\n` +
+        `bad sideband commit\n`
+    );
+    const badCommit = await encodeGitObject("commit", badCommitPayload);
+    const missingBasePack = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: "cd".repeat(20),
+        delta: buildAppendOnlyDelta(
+          new TextEncoder().encode("base\n"),
+          new TextEncoder().encode("missing\n")
+        ),
+      },
+      { type: "tree", payload: badTreePayload },
+      { type: "commit", payload: badCommitPayload },
+    ]);
+
+    const response = await pushBody(
+      `https://example.com/${owner}/${repo}/git-receive-pack`,
+      concatChunks([
+        pktLine(
+          `${seeded.nextCommit.oid} ${badCommit.oid} refs/heads/main\0 report-status side-band-64k ofs-delta agent=test\n`
+        ),
+        flushPkt(),
+        missingBasePack,
+      ]),
+      { stream: true }
+    );
+    expect(response.status).toBe(200);
+
+    const decoded = decodeReceiveSideband(new Uint8Array(await response.arrayBuffer()));
+    expect(decoded.progress.some((line) => line.includes("Uploading pack to object storage"))).toBe(
+      true
+    );
+    expect(decoded.reportStatus.some((line) => line.startsWith("unpack error"))).toBe(true);
+    expect(decoded.reportStatus.some((line) => line.startsWith("ng refs/heads/main"))).toBe(true);
+    expect(await listStagedReceivePacks(repoId)).toEqual([]);
+
+    const activity = await callStubWithRetry(seeded.getStub, (stub) => stub.getRepoActivity());
+    expect(activity).toBeNull();
   });
 
   it("returns 499 and cleans up when the request aborts during the streaming upload", async () => {

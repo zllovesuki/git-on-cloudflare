@@ -50,6 +50,21 @@ import type { InPackDependencyQueue } from "./dependencies.ts";
 
 const DEFAULT_LRU_BUDGET = 32 * 1024 * 1024; // 32 MiB
 const DEFAULT_CHUNK_SIZE = 4_194_304; // 4 MiB — larger chunks reduce R2 reads during resolve
+const RESOLVE_PROGRESS_STEPS = 20;
+
+function emitResolveProgress(
+  onProgress: ResolveOptions["onProgress"],
+  resolved: number,
+  total: number
+): void {
+  if (!onProgress || total <= 0) return;
+  const percent = Math.round((resolved / total) * 100);
+  if (resolved >= total) {
+    onProgress(`Resolving deltas: 100% (${total}/${total}), done.\n`);
+    return;
+  }
+  onProgress(`Resolving deltas: ${percent}% (${resolved}/${total})\r`);
+}
 
 export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<ResolveResult> {
   const { env, packKey, packSize, log, scanResult, repoId, lruBudget } = opts;
@@ -71,9 +86,11 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
   if (unresolvedCount === 0) {
     return await writeAndParseIdx(resolveOpts, packKey, packSize, table, objectCount, packChecksum);
   }
+  opts.onProgress?.(`Resolving deltas: 0% (0/${unresolvedCount})\r`);
 
   const lru = new PayloadLRU(lruBudget ?? DEFAULT_LRU_BUDGET, objectCount);
   const chunkSize = opts.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  const progressInterval = Math.max(1, Math.floor(unresolvedCount / RESOLVE_PROGRESS_STEPS));
   // Two readers: one for the main sequential pass, one for rematerialization
   // and deferred work so cache misses do not trash the main pass window.
   const seqReader = new SequentialReader(
@@ -140,7 +157,14 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
         refLookup: null,
       });
       resolved++;
-      logResolveProgress(log, resolved, initialResolvedCount, unresolvedCount);
+      logResolveProgress(
+        log,
+        opts.onProgress,
+        resolved,
+        initialResolvedCount,
+        unresolvedCount,
+        progressInterval
+      );
     }
 
     if (resolved !== objectCount) {
@@ -216,7 +240,14 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
       deferredQueued,
     });
     resolved++;
-    logResolveProgress(log, resolved, initialResolvedCount, unresolvedCount);
+    logResolveProgress(
+      log,
+      opts.onProgress,
+      resolved,
+      initialResolvedCount,
+      unresolvedCount,
+      progressInterval
+    );
   }
 
   for (const index of deferred) {
@@ -295,7 +326,14 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
       lru.set(index, { type: baseObj.type, payload: result });
     }
     resolved++;
-    logResolveProgress(log, resolved, initialResolvedCount, unresolvedCount);
+    logResolveProgress(
+      log,
+      opts.onProgress,
+      resolved,
+      initialResolvedCount,
+      unresolvedCount,
+      progressInterval
+    );
     resolved = await drainReadyDeferredQueue({
       readyDeferred,
       deferredQueued,
@@ -449,13 +487,21 @@ async function cacheResolvedBaseIfNeeded(
 
 function logResolveProgress(
   log: ResolveOptions["log"],
+  onProgress: ResolveOptions["onProgress"],
   resolved: number,
   initialResolvedCount: number,
-  unresolvedCount: number
+  unresolvedCount: number,
+  progressInterval: number
 ): void {
   const newlyResolved = resolved - initialResolvedCount;
   if (newlyResolved > 0 && newlyResolved % 10000 === 0) {
     log.debug("resolve:progress", { resolved: newlyResolved, total: unresolvedCount });
+  }
+  if (
+    newlyResolved > 0 &&
+    (newlyResolved % progressInterval === 0 || newlyResolved === unresolvedCount)
+  ) {
+    emitResolveProgress(onProgress, newlyResolved, unresolvedCount);
   }
 }
 
@@ -514,6 +560,7 @@ async function writeAndParseIdx(
   packChecksum: Uint8Array
 ): Promise<ResolveResult> {
   throwIfAborted(opts.signal, opts.log, "resolve:write-idx");
+  opts.onProgress?.("Writing pack index\n");
   const idxBuf = await writeIdxV2(table, objectCount, packChecksum);
   throwIfAborted(opts.signal, opts.log, "resolve:write-idx");
   await putPackIdx(opts, idxBuf);

@@ -40,20 +40,29 @@ export async function capabilityAdvertisement(
   // Query the repo DO for current refs so clients include the correct old OID,
   // enabling non-fast-forward (force) pushes when desired.
   let refs: { name: string; oid: string }[] = [];
+  let supportsStreamingReceiveSideband = false;
   if (repoId) {
     try {
       const stub = getRepoStub(env, repoId);
-      const data = await stub.listRefs();
+      const [data, storageMode] = await Promise.all([
+        stub.listRefs(),
+        stub.getRepoStorageMode().catch(() => "legacy"),
+      ]);
       if (Array.isArray(data)) refs = data as { name: string; oid: string }[];
+      supportsStreamingReceiveSideband = storageMode === "streaming";
     } catch {}
   }
   const caps = [
     "report-status",
     "delete-refs",
+    supportsStreamingReceiveSideband ? "side-band-64k" : undefined,
+    supportsStreamingReceiveSideband ? "quiet" : undefined,
     "atomic",
     "ofs-delta",
     `agent=git-on-cloudflare/0.1`,
-  ].join(" ");
+  ]
+    .filter((cap): cap is string => Boolean(cap))
+    .join(" ");
 
   const lines: Uint8Array[] = [];
   // Smart HTTP service prelude then flush

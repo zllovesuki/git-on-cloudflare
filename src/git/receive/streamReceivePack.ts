@@ -1,35 +1,44 @@
 import type { CacheContext } from "@/cache/index.ts";
 import type { Logger } from "@/common/logger.ts";
+import type { RepoDurableObject } from "@/do/index.ts";
+import type { PackCatalogRow } from "@/do/repo/db/schema.ts";
+import type { ReceiveStatus } from "@/git/operations/validation.ts";
 
-import { asBodyInit, clientAbortedResponse, createLogger, getRepoStub } from "@/common/index.ts";
+import { clientAbortedResponse, createLogger, getRepoStub } from "@/common/index.ts";
 import {
   MAX_SIMULTANEOUS_CONNECTIONS,
   SubrequestLimiter,
   countSubrequest,
 } from "@/git/operations/limits.ts";
-import {
-  isValidRefName,
-  type ReceiveCommand,
-  validateReceiveCommands,
-} from "@/git/operations/validation.ts";
-import {
-  resolveDeltasAndWriteIdx,
-  runPackConnectivityCheck,
-  scanPack,
-} from "@/git/pack/indexer/index.ts";
+import { isValidRefName, validateReceiveCommands } from "@/git/operations/validation.ts";
 import { logOnce } from "@/git/object-store/support.ts";
-import { doPrefix, r2PackKey } from "@/keys.ts";
+import { executeReceivePipeline, ReceivePipelineHttpError } from "./pipeline.ts";
 import { readPktSectionStream } from "./pktSectionStream.ts";
-import { deleteStagedPack, stagePackToR2, type StagedPackUpload } from "./r2Upload.ts";
+import {
+  parseReceiveRequest,
+  type ParsedReceiveRequest,
+  type ReceiveCommandList,
+  type ReceiveNegotiatedCapabilities,
+} from "./request.ts";
+import {
+  buildReceiveResultResponse,
+  ReceiveSidebandWriter,
+  type ReceiveResponseMode,
+} from "./response.ts";
 import {
   buildReceiveReportStatus,
-  invalidRefReport,
+  buildReceiveUnpackFailureReport,
   isReceiveAbort,
-  parseReceiveCommands,
   throwIfReceiveAborted,
 } from "./support.ts";
 
 const RECEIVE_SUBREQUEST_BUDGET = 5_000;
+
+type RepoStub = DurableObjectStub<RepoDurableObject>;
+type RepoStateChangeHandler = (change: {
+  changed: boolean;
+  empty: boolean;
+}) => Promise<void> | void;
 
 function countReceiveSubrequest(cacheCtx: CacheContext, log: Logger, op: string, n = 1) {
   if (countSubrequest(cacheCtx, n)) return;
@@ -62,125 +71,173 @@ function buildReceiveCacheContext(
   };
 }
 
-type ReceiveCleanupAttempt = "inline" | "retry";
-
-async function abortReceiveLease(args: {
-  stub: ReturnType<typeof getRepoStub>;
-  leaseToken: string;
-  log: Logger;
-  reason: string;
-  attempt: ReceiveCleanupAttempt;
-}): Promise<boolean> {
-  try {
-    const cleared = await args.stub.abortReceive(args.leaseToken);
-    if (!cleared) {
-      args.log.warn("receive:abort-missed", {
-        reason: args.reason,
-        attempt: args.attempt,
-        leaseToken: args.leaseToken,
-      });
-    }
-    return cleared;
-  } catch (error) {
-    args.log.warn("receive:abort-failed", {
-      reason: args.reason,
-      attempt: args.attempt,
-      leaseToken: args.leaseToken,
-      error: String(error),
-    });
-    return false;
-  }
+function selectReceiveResponseMode(
+  capabilities: ReceiveNegotiatedCapabilities
+): ReceiveResponseMode {
+  return capabilities.sideBand64k ? "side-band-64k" : "plain";
 }
 
-async function cleanupStagedPack(args: {
-  stagedUpload: StagedPackUpload | undefined;
-  log: Logger;
-  reason: string;
-  attempt: ReceiveCleanupAttempt;
-}): Promise<boolean> {
-  if (!args.stagedUpload) return true;
-
-  try {
-    await deleteStagedPack(args.stagedUpload);
-    return true;
-  } catch (error) {
-    args.log.warn("receive:staged-pack-cleanup-failed", {
-      reason: args.reason,
-      attempt: args.attempt,
-      packKey: args.stagedUpload.packKey,
-      error: String(error),
-    });
-    return false;
+function scheduleRepoStateChange(
+  ctx: ExecutionContext,
+  onRepoStateChanged: RepoStateChangeHandler | undefined,
+  change: {
+    changed: boolean;
+    empty: boolean;
   }
+): void {
+  if (!onRepoStateChanged || !change.changed) return;
+  ctx.waitUntil(Promise.resolve().then(() => onRepoStateChanged(change)));
 }
 
-async function cleanupFailedReceive(args: {
+function buildInvalidRefResponse(args: {
+  mode: ReceiveResponseMode;
+  commands: ReceiveCommandList;
+}): Response {
+  return buildReceiveResultResponse({
+    mode: args.mode,
+    reportStatusBody: buildReceiveUnpackFailureReport(args.commands, "invalid-ref", "invalid"),
+    changed: false,
+    empty: false,
+  });
+}
+
+function buildPreflightConflictResponse(args: {
+  mode: ReceiveResponseMode;
+  commands: ReceiveCommandList;
+  statuses: ReceiveStatus[];
+}): Response {
+  return buildReceiveResultResponse({
+    mode: args.mode,
+    reportStatusBody: buildReceiveReportStatus({
+      unpackOk: true,
+      commands: args.commands,
+      statuses: args.statuses,
+    }),
+    changed: false,
+    empty: false,
+  });
+}
+
+function getErrorStatus(error: unknown): number {
+  if (error instanceof ReceivePipelineHttpError) {
+    return error.status;
+  }
+
+  const message = String(error);
+  const lower = message.toLowerCase();
+  if (lower.includes("unsupported pack version") || lower.includes("pack header")) {
+    return 415;
+  }
+  if (
+    lower.includes("malformed") ||
+    lower.includes("missing") ||
+    lower.includes("ended before") ||
+    lower.includes("could not be resolved") ||
+    lower.includes("delta")
+  ) {
+    return 400;
+  }
+  return 500;
+}
+
+function createSidebandReceiveResponse(args: {
+  env: Env;
+  repoId: string;
+  request: Request;
   ctx: ExecutionContext;
-  stub: ReturnType<typeof getRepoStub>;
-  leaseToken: string;
-  stagedUpload: StagedPackUpload | undefined;
+  stub: RepoStub;
   log: Logger;
-  reason: string;
-}): Promise<void> {
-  const leaseCleared = await abortReceiveLease({
-    stub: args.stub,
-    leaseToken: args.leaseToken,
-    log: args.log,
-    reason: args.reason,
-    attempt: "inline",
-  });
-  const stagedPackDeleted = await cleanupStagedPack({
-    stagedUpload: args.stagedUpload,
-    log: args.log,
-    reason: args.reason,
-    attempt: "inline",
-  });
+  cacheCtx: CacheContext;
+  limiter: SubrequestLimiter;
+  leaseToken: string;
+  activeCatalog: PackCatalogRow[];
+  commands: ParsedReceiveRequest["commands"];
+  capabilities: ReceiveNegotiatedCapabilities;
+  packStream: ReadableStream<Uint8Array>;
+  bytesConsumed: number;
+  onRepoStateChanged?: RepoStateChangeHandler | undefined;
+}): Response {
+  const responseStream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const writer = new ReceiveSidebandWriter(controller);
+      const onProgress = args.capabilities.quiet
+        ? undefined
+        : (message: string) => writer.progress(message);
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        controller.close();
+      };
 
-  if (leaseCleared && stagedPackDeleted) return;
-
-  args.log.warn("receive:cleanup-retry-scheduled", {
-    reason: args.reason,
-    leaseToken: args.leaseToken,
-    packKey: args.stagedUpload?.packKey,
-  });
-  args.ctx.waitUntil(
-    (async () => {
-      const retryLeaseCleared =
-        leaseCleared ||
-        (await abortReceiveLease({
+      try {
+        const result = await executeReceivePipeline({
+          env: args.env,
+          repoId: args.repoId,
+          request: args.request,
+          ctx: args.ctx,
+          packStream: args.packStream,
+          bytesConsumed: args.bytesConsumed,
           stub: args.stub,
           leaseToken: args.leaseToken,
+          activeCatalog: args.activeCatalog,
+          commands: args.commands,
           log: args.log,
-          reason: args.reason,
-          attempt: "retry",
-        }));
-      const retryStagedPackDeleted =
-        stagedPackDeleted ||
-        (await cleanupStagedPack({
-          stagedUpload: args.stagedUpload,
-          log: args.log,
-          reason: args.reason,
-          attempt: "retry",
-        }));
-
-      if (!retryLeaseCleared || !retryStagedPackDeleted) {
-        args.log.error("receive:cleanup-retry-incomplete", {
-          reason: args.reason,
-          leaseCleared: retryLeaseCleared,
-          stagedPackDeleted: retryStagedPackDeleted,
-          leaseToken: args.leaseToken,
-          packKey: args.stagedUpload?.packKey,
+          cacheCtx: args.cacheCtx,
+          limiter: args.limiter,
+          countSubrequest: (op, n = 1) => countReceiveSubrequest(args.cacheCtx, args.log, op, n),
+          onProgress,
         });
+
+        scheduleRepoStateChange(args.ctx, args.onRepoStateChanged, {
+          changed: result.changed,
+          empty: result.empty,
+        });
+        writer.reportStatus(result.reportStatusBody);
+        logReceiveEnd(args.log, 200, {
+          changed: result.changed,
+          empty: result.empty,
+          packKey: result.packKey,
+          packBytes: result.packBytes,
+        });
+      } catch (error) {
+        if (isReceiveAbort(args.request, error)) {
+          logReceiveEnd(args.log, 499, { reason: "client-aborted" });
+          close();
+          return;
+        }
+
+        args.log.error("receive:error", { error: String(error) });
+        writer.reportStatus(
+          buildReceiveUnpackFailureReport(
+            args.commands,
+            error instanceof ReceivePipelineHttpError ? error.message : String(error)
+          )
+        );
+        logReceiveEnd(args.log, 200, { reason: "sideband-unpack-error" });
+      } finally {
+        close();
       }
-    })()
-  );
+    },
+  });
+
+  return new Response(responseStream, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/x-git-receive-pack-result",
+      "Cache-Control": "no-cache",
+    },
+  });
 }
 
 export async function handleStreamingReceivePackPOST(
   env: Env,
   repoId: string,
   request: Request,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  options?: {
+    onRepoStateChanged?: RepoStateChangeHandler | undefined;
+  }
 ): Promise<Response> {
   const stub = getRepoStub(env, repoId);
   const log = createLogger(env.LOG_LEVEL, {
@@ -216,14 +273,7 @@ export async function handleStreamingReceivePackPOST(
 
   if (begin.repoStorageMode !== "streaming") {
     countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
-    await cleanupFailedReceive({
-      ctx,
-      stub,
-      leaseToken: begin.lease.token,
-      stagedUpload: undefined,
-      log,
-      reason: "mode-mismatch-before-read",
-    });
+    await stub.abortReceive(begin.lease.token).catch(() => {});
     log.warn("receive:mode-mismatch", {
       expectedMode: "streaming",
       currentMode: begin.repoStorageMode,
@@ -235,301 +285,107 @@ export async function handleStreamingReceivePackPOST(
     });
   }
 
-  let stagedUpload: StagedPackUpload | undefined;
+  let pipelineStarted = false;
   try {
     const { lines, bytesConsumed, packStream } = await readPktSectionStream(request.body);
     throwIfReceiveAborted(request, log, "read-command-section");
-    const commands = parseReceiveCommands(lines);
 
-    const invalidCommand = commands.find((command) => !isValidRefName(command.ref));
+    const parsedRequest = parseReceiveRequest(lines);
+    const responseMode = selectReceiveResponseMode(parsedRequest.capabilities);
+
+    const invalidCommand = parsedRequest.commands.find((command) => !isValidRefName(command.ref));
     if (invalidCommand) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
-      await cleanupFailedReceive({
-        ctx,
-        stub,
-        leaseToken: begin.lease.token,
-        stagedUpload: undefined,
-        log,
-        reason: "invalid-ref",
-      });
+      await stub.abortReceive(begin.lease.token).catch(() => {});
       log.warn("receive:invalid-ref", { ref: invalidCommand.ref });
-      logReceiveEnd(log, 200, { reason: "invalid-ref", changed: false, empty: false });
-      return invalidRefReport(commands, "invalid-ref");
+      const response = buildInvalidRefResponse({
+        mode: responseMode,
+        commands: parsedRequest.commands,
+      });
+      logReceiveEnd(log, response.status, { reason: "invalid-ref", changed: false, empty: false });
+      return response;
     }
 
-    const preflightStatuses = validateReceiveCommands(begin.refs, commands);
+    const preflightStatuses = validateReceiveCommands(begin.refs, parsedRequest.commands);
     if (!preflightStatuses.every((status) => status.ok)) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
-      await cleanupFailedReceive({
-        ctx,
-        stub,
-        leaseToken: begin.lease.token,
-        stagedUpload: undefined,
-        log,
-        reason: "preflight-ref-conflict",
-      });
+      await stub.abortReceive(begin.lease.token).catch(() => {});
       log.warn("receive:ref-conflict", {
         conflictCount: preflightStatuses.filter((status) => !status.ok).length,
         stage: "preflight",
       });
-      const response = new Response(
-        asBodyInit(
-          buildReceiveReportStatus({
-            unpackOk: true,
-            commands,
-            statuses: preflightStatuses,
-          })
-        ),
-        {
-          status: 200,
-          headers: {
-            "Content-Type": "application/x-git-receive-pack-result",
-            "Cache-Control": "no-cache",
-            "X-Repo-Changed": "0",
-            "X-Repo-Empty": "0",
-          },
-        }
-      );
+      const response = buildPreflightConflictResponse({
+        mode: responseMode,
+        commands: parsedRequest.commands,
+        statuses: preflightStatuses,
+      });
       logReceiveEnd(log, response.status, { reason: "preflight-ref-conflict", changed: false });
       return response;
     }
 
-    const hasNonDelete = commands.some((command) => !/^0{40}$/i.test(command.newOid));
-    let stagedPack:
-      | {
-          packKey: string;
-          packBytes: number;
-          idxBytes: number;
-          objectCount: number;
-        }
-      | undefined;
-
-    if (hasNonDelete) {
-      const packKey = r2PackKey(doPrefix(stub.id.toString()), `pack-rx-${begin.lease.token}.pack`);
-      stagedUpload = await stagePackToR2({
+    if (responseMode === "side-band-64k") {
+      return createSidebandReceiveResponse({
         env,
+        repoId,
         request,
+        ctx,
+        stub,
+        log,
+        cacheCtx,
+        limiter,
+        leaseToken: begin.lease.token,
+        activeCatalog: begin.activeCatalog,
+        commands: parsedRequest.commands,
+        capabilities: parsedRequest.capabilities,
         packStream,
-        packKey,
         bytesConsumed,
-        limiter,
-        countSubrequest: (op, n = 1) => countReceiveSubrequest(cacheCtx, log, op, n),
+        onRepoStateChanged: options?.onRepoStateChanged,
       });
-      throwIfReceiveAborted(request, log, "stage-pack");
-
-      const scanResult = await scanPack({
-        env,
-        packKey: stagedUpload.packKey,
-        packSize: stagedUpload.packBytes,
-        limiter,
-        countSubrequest: (n = 1) => countReceiveSubrequest(cacheCtx, log, "r2:scan-pack", n),
-        log,
-        signal: request.signal,
-      });
-      throwIfReceiveAborted(request, log, "scan-pack");
-
-      const resolveResult = await resolveDeltasAndWriteIdx({
-        env,
-        packKey: stagedUpload.packKey,
-        packSize: stagedUpload.packBytes,
-        limiter,
-        countSubrequest: (n = 1) => countReceiveSubrequest(cacheCtx, log, "r2:resolve-pack", n),
-        log,
-        scanResult,
-        activeCatalog: begin.activeCatalog,
-        cacheCtx,
-        repoId,
-        signal: request.signal,
-      });
-      throwIfReceiveAborted(request, log, "resolve-pack");
-
-      const connectivityStatuses = preflightStatuses.map((status) => ({ ...status }));
-      await runPackConnectivityCheck({
-        env,
-        repoId,
-        newPackKey: stagedUpload.packKey,
-        newIdxView: resolveResult.idxView,
-        newPackSize: stagedUpload.packBytes,
-        activeCatalog: begin.activeCatalog,
-        commands,
-        statuses: connectivityStatuses,
-        log,
-        cacheCtx,
-      });
-      throwIfReceiveAborted(request, log, "connectivity-check");
-
-      if (!connectivityStatuses.every((status) => status.ok)) {
-        countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
-        await cleanupFailedReceive({
-          ctx,
-          stub,
-          leaseToken: begin.lease.token,
-          stagedUpload,
-          log,
-          reason: "connectivity-rejected",
-        });
-        log.warn("receive:connectivity-rejected", {
-          conflictCount: connectivityStatuses.filter((status) => !status.ok).length,
-        });
-        const response = new Response(
-          asBodyInit(
-            buildReceiveReportStatus({
-              unpackOk: true,
-              commands,
-              statuses: connectivityStatuses,
-            })
-          ),
-          {
-            status: 200,
-            headers: {
-              "Content-Type": "application/x-git-receive-pack-result",
-              "Cache-Control": "no-cache",
-              "X-Repo-Changed": "0",
-              "X-Repo-Empty": "0",
-            },
-          }
-        );
-        logReceiveEnd(log, response.status, { reason: "connectivity-rejected", changed: false });
-        return response;
-      }
-
-      stagedPack = {
-        packKey: stagedUpload.packKey,
-        packBytes: stagedUpload.packBytes,
-        idxBytes: resolveResult.idxBytes,
-        objectCount: resolveResult.objectCount,
-      };
     }
 
-    countReceiveSubrequest(cacheCtx, log, "do:finalize-receive");
-    throwIfReceiveAborted(request, log, "finalize-receive");
-    const finalize = await stub.finalizeReceive({
-      token: begin.lease.token,
-      commands,
-      stagedPack,
+    pipelineStarted = true;
+    const result = await executeReceivePipeline({
+      env,
+      repoId,
+      request,
+      ctx,
+      packStream,
+      bytesConsumed,
+      stub,
+      leaseToken: begin.lease.token,
+      activeCatalog: begin.activeCatalog,
+      commands: parsedRequest.commands,
+      log,
+      cacheCtx,
+      limiter,
+      countSubrequest: (op, n = 1) => countReceiveSubrequest(cacheCtx, log, op, n),
     });
 
-    if (finalize.status === "lease_mismatch") {
-      await cleanupStagedPack({
-        stagedUpload,
-        log,
-        reason: "finalize-lease-mismatch",
-        attempt: "inline",
-      });
-      log.warn("receive:lease-mismatch", { leaseToken: begin.lease.token });
-      logReceiveEnd(log, 503, { reason: "lease-mismatch" });
-      return new Response("Repository receive lease expired before commit.\n", {
-        status: 503,
-        headers: {
-          "Retry-After": "10",
-          "Content-Type": "text/plain; charset=utf-8",
-        },
-      });
-    }
+    scheduleRepoStateChange(ctx, options?.onRepoStateChanged, {
+      changed: result.changed,
+      empty: result.empty,
+    });
 
-    if (finalize.status === "mode_mismatch") {
-      await cleanupStagedPack({
-        stagedUpload,
-        log,
-        reason: "finalize-mode-mismatch",
-        attempt: "inline",
-      });
-      log.warn("receive:mode-mismatch", { currentMode: finalize.currentMode });
-      const response = new Response(`${finalize.message}\n`, {
-        status: 409,
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
-      });
-      logReceiveEnd(log, response.status, { reason: "mode-mismatch-after-begin" });
-      return response;
-    }
-
-    if (finalize.status === "ref_conflict") {
-      await cleanupStagedPack({
-        stagedUpload,
-        log,
-        reason: "finalize-ref-conflict",
-        attempt: "inline",
-      });
-      log.warn("receive:ref-conflict", {
-        conflictCount: finalize.statuses.filter((status) => !status.ok).length,
-        stage: "finalize",
-      });
-      const response = new Response(
-        asBodyInit(
-          buildReceiveReportStatus({
-            unpackOk: true,
-            commands,
-            statuses: finalize.statuses,
-          })
-        ),
-        {
-          status: 200,
-          headers: {
-            "Content-Type": "application/x-git-receive-pack-result",
-            "Cache-Control": "no-cache",
-            "X-Repo-Changed": "0",
-            "X-Repo-Empty": "0",
-          },
-        }
-      );
-      logReceiveEnd(log, response.status, { reason: "finalize-ref-conflict", changed: false });
-      return response;
-    }
-
-    if (finalize.status !== "committed") {
-      await cleanupStagedPack({
-        stagedUpload,
-        log,
-        reason: "unexpected-finalize-result",
-        attempt: "inline",
-      });
-      log.error("receive:unexpected-finalize-result", { status: finalize.status });
-      const response = new Response("Unexpected receive finalization result.\n", { status: 500 });
-      logReceiveEnd(log, response.status, { reason: "unexpected-finalize-result" });
-      return response;
-    }
-
-    if (finalize.shouldQueueCompaction) {
-      log.info("receive:compaction-requested", { repoId });
-    }
-
-    const response = new Response(
-      asBodyInit(
-        buildReceiveReportStatus({
-          unpackOk: true,
-          commands,
-          statuses: finalize.statuses,
-        })
-      ),
-      {
-        status: 200,
-        headers: {
-          "Content-Type": "application/x-git-receive-pack-result",
-          "Cache-Control": "no-cache",
-          "X-Repo-Changed": finalize.changed ? "1" : "0",
-          "X-Repo-Empty": finalize.empty ? "1" : "0",
-        },
-      }
-    );
+    const response = buildReceiveResultResponse({
+      mode: "plain",
+      reportStatusBody: result.reportStatusBody,
+      changed: result.changed,
+      empty: result.empty,
+    });
     logReceiveEnd(log, response.status, {
-      changed: finalize.changed,
-      empty: finalize.empty,
-      packKey: stagedPack?.packKey,
-      packBytes: stagedPack?.packBytes,
+      changed: result.changed,
+      empty: result.empty,
+      packKey: result.packKey,
+      packBytes: result.packBytes,
     });
     return response;
   } catch (error) {
-    countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
-    const aborted = isReceiveAbort(request, error);
-    await cleanupFailedReceive({
-      ctx,
-      stub,
-      leaseToken: begin.lease.token,
-      stagedUpload,
-      log,
-      reason: aborted ? "receive-aborted" : "receive-error",
-    });
-    if (aborted) {
+    if (!pipelineStarted) {
+      countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
+      await stub.abortReceive(begin.lease.token).catch(() => {});
+    }
+
+    if (isReceiveAbort(request, error)) {
       log.info("receive:aborted", { error: String(error) });
       logReceiveEnd(log, 499, { reason: "client-aborted" });
       return clientAbortedResponse();
@@ -537,21 +393,17 @@ export async function handleStreamingReceivePackPOST(
 
     log.error("receive:error", { error: String(error) });
 
-    const message = String(error);
-    const lower = message.toLowerCase();
-    const status =
-      lower.includes("unsupported pack version") || lower.includes("pack header")
-        ? 415
-        : lower.includes("malformed") ||
-            lower.includes("missing") ||
-            lower.includes("ended before") ||
-            lower.includes("could not be resolved") ||
-            lower.includes("delta")
-          ? 400
-          : 500;
+    if (error instanceof ReceivePipelineHttpError) {
+      const response = new Response(`${error.message}\n`, {
+        status: error.status,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+      logReceiveEnd(log, response.status, { reason: error.reason });
+      return response;
+    }
 
-    const response = new Response(`${message}\n`, {
-      status,
+    const response = new Response(`${String(error)}\n`, {
+      status: getErrorStatus(error),
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
     logReceiveEnd(log, response.status, { reason: "error" });

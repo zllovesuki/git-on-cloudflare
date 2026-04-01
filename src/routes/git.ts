@@ -1,6 +1,6 @@
 import type { HeadInfo, Ref } from "@/git";
 
-import { AutoRouter } from "itty-router";
+import { AutoRouter, type AutoRouterType } from "itty-router";
 import {
   capabilityAdvertisement,
   parseV2Command,
@@ -212,9 +212,16 @@ async function handleReceivePackPOST(
   const repoStorageMode = await stub.getRepoStorageMode().catch(() => "legacy");
 
   if (repoStorageMode === "streaming") {
-    const response = await handleStreamingReceivePackPOST(env, repoId, request, ctx);
-    await applyReceiveSideEffects(env, repoId, response.headers);
-    return response;
+    return await handleStreamingReceivePackPOST(env, repoId, request, ctx, {
+      onRepoStateChanged: async ({ changed, empty }) => {
+        if (!changed) return;
+        const headers = new Headers({
+          "X-Repo-Changed": "1",
+          "X-Repo-Empty": empty ? "1" : "0",
+        });
+        await applyReceiveSideEffects(env, repoId, headers);
+      },
+    });
   }
 
   // Forward raw body to the Durable Object /receive endpoint
@@ -255,7 +262,7 @@ async function handleReceivePackPOST(
  * Sets up handlers for info/refs, upload-pack, and receive-pack endpoints.
  * @param router - The application router instance
  */
-export function registerGitRoutes(router: ReturnType<typeof AutoRouter>) {
+export function registerGitRoutes(router: AutoRouterType) {
   // Git info/refs
   router.get(`/:owner/:repo/info/refs`, async (request, env: Env) => {
     const u = new URL(request.url);

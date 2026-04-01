@@ -6,12 +6,71 @@ import { appendBytes, cloneBytes } from "./bytes.ts";
 const MULTIPART_PART_BYTES = 8 * 1024 * 1024;
 const PACK_HEADER_BYTES = 12;
 const PACK_TRAILER_BYTES = 20;
+const UPLOAD_PROGRESS_STEPS = 20;
 
 export type StagedPackUpload = {
   packKey: string;
   packBytes: number;
   cleanup(): Promise<void>;
 };
+
+function formatProgressBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KiB`;
+  }
+  return `${bytes} B`;
+}
+
+function emitKnownLengthUploadProgress(args: {
+  onProgress?: (message: string) => void;
+  uploadedBytes: number;
+  totalBytes: number;
+  progressInterval: number;
+  lastReportedStep: number;
+}): number {
+  if (!args.onProgress || args.totalBytes <= 0) return args.lastReportedStep;
+
+  const percent = Math.floor((args.uploadedBytes / args.totalBytes) * 100);
+  const nextStep = Math.min(
+    UPLOAD_PROGRESS_STEPS,
+    Math.floor(args.uploadedBytes / args.progressInterval)
+  );
+  if (nextStep <= args.lastReportedStep && args.uploadedBytes < args.totalBytes) {
+    return args.lastReportedStep;
+  }
+
+  if (args.uploadedBytes >= args.totalBytes) {
+    args.onProgress(
+      `Uploading pack to object storage: 100% (${formatProgressBytes(args.totalBytes)}/${formatProgressBytes(args.totalBytes)}), done.\n`
+    );
+    return UPLOAD_PROGRESS_STEPS;
+  }
+
+  args.onProgress(
+    `Uploading pack to object storage: ${percent}% (${formatProgressBytes(args.uploadedBytes)}/${formatProgressBytes(args.totalBytes)})\r`
+  );
+  return nextStep;
+}
+
+function emitStreamingUploadProgress(args: {
+  onProgress?: (message: string) => void;
+  uploadedBytes: number;
+  reportEveryBytes: number;
+  lastReportedBytes: number;
+}): number {
+  if (!args.onProgress) return args.lastReportedBytes;
+  if (args.uploadedBytes < args.reportEveryBytes) return args.lastReportedBytes;
+  if (args.uploadedBytes - args.lastReportedBytes < args.reportEveryBytes) {
+    return args.lastReportedBytes;
+  }
+  args.onProgress(
+    `Uploading pack to object storage: ${formatProgressBytes(args.uploadedBytes)} uploaded\r`
+  );
+  return args.uploadedBytes;
+}
 
 function parseContentLength(request: Request): number | undefined {
   const raw = request.headers.get("Content-Length");
@@ -64,6 +123,7 @@ async function stageKnownLengthPack(args: {
   packStream: ReadableStream<Uint8Array>;
   limiter: SubrequestLimiter;
   countSubrequest(op: string, n?: number): void;
+  onProgress?: (message: string) => void;
 }): Promise<StagedPackUpload> {
   if (args.expectedLength <= 0) {
     throw new Error("Streaming receive expected a non-empty pack body.");
@@ -82,6 +142,12 @@ async function stageKnownLengthPack(args: {
   let totalBytes = 0;
   let headerPrefix: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   let tail: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  const progressInterval = Math.max(1, Math.floor(args.expectedLength / UPLOAD_PROGRESS_STEPS));
+  let lastReportedStep = 0;
+
+  args.onProgress?.(
+    `Uploading pack to object storage: 0% (0 B/${formatProgressBytes(args.expectedLength)})\r`
+  );
 
   try {
     while (true) {
@@ -98,6 +164,13 @@ async function stageKnownLengthPack(args: {
 
       tail = await updateTrailerWindow(digestWriter, tail, chunk);
       await uploadWriter.write(chunk);
+      lastReportedStep = emitKnownLengthUploadProgress({
+        onProgress: args.onProgress,
+        uploadedBytes: totalBytes,
+        totalBytes: args.expectedLength,
+        progressInterval,
+        lastReportedStep,
+      });
     }
 
     if (totalBytes !== args.expectedLength) {
@@ -156,6 +229,7 @@ async function stageMultipartPack(args: {
   packStream: ReadableStream<Uint8Array>;
   limiter: SubrequestLimiter;
   countSubrequest(op: string, n?: number): void;
+  onProgress?: (message: string) => void;
 }): Promise<StagedPackUpload> {
   args.countSubrequest("r2:create-pack-multipart");
   const upload = await args.limiter.run("r2:create-pack-multipart", async () => {
@@ -171,6 +245,9 @@ async function stageMultipartPack(args: {
   let headerPrefix: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   let tail: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   let partNumber = 1;
+  let lastReportedBytes = 0;
+
+  args.onProgress?.("Uploading pack to object storage: streaming upload started\n");
 
   try {
     while (true) {
@@ -187,6 +264,12 @@ async function stageMultipartPack(args: {
 
       tail = await updateTrailerWindow(digestWriter, tail, chunk);
       buffered = appendBytes(buffered, chunk);
+      lastReportedBytes = emitStreamingUploadProgress({
+        onProgress: args.onProgress,
+        uploadedBytes: totalBytes,
+        reportEveryBytes: MULTIPART_PART_BYTES,
+        lastReportedBytes,
+      });
 
       while (buffered.byteLength >= MULTIPART_PART_BYTES) {
         const partBytes = buffered.slice(0, MULTIPART_PART_BYTES);
@@ -232,6 +315,9 @@ async function stageMultipartPack(args: {
     await args.limiter.run("r2:complete-pack-multipart", async () => {
       await upload.complete(uploadedParts);
     });
+    args.onProgress?.(
+      `Uploading pack to object storage: done (${formatProgressBytes(totalBytes)})\n`
+    );
 
     return {
       packKey: args.packKey,
@@ -263,6 +349,7 @@ export async function stagePackToR2(args: {
   bytesConsumed: number;
   limiter: SubrequestLimiter;
   countSubrequest(op: string, n?: number): void;
+  onProgress?: (message: string) => void;
 }): Promise<StagedPackUpload> {
   const remainingLength = getRemainingBodyLength(args.request, args.bytesConsumed);
   if (remainingLength !== undefined) {
@@ -273,6 +360,7 @@ export async function stagePackToR2(args: {
       packStream: args.packStream,
       limiter: args.limiter,
       countSubrequest: args.countSubrequest,
+      onProgress: args.onProgress,
     });
   }
 
@@ -282,6 +370,7 @@ export async function stagePackToR2(args: {
     packStream: args.packStream,
     limiter: args.limiter,
     countSubrequest: args.countSubrequest,
+    onProgress: args.onProgress,
   });
 }
 

@@ -36,6 +36,21 @@ const MIN_PACKED_ENTRY_BYTES = 9;
 const MAX_INDEXABLE_OBJECT_COUNT = 250_000;
 const MAX_PACK_OFFSET = 0xffffffff;
 const MAX_PACK_OBJECT_SIZE = 0xffffffff;
+const SCAN_PROGRESS_STEPS = 20;
+
+function emitScanProgress(
+  onProgress: IndexerOptions["onProgress"],
+  processed: number,
+  total: number
+): void {
+  if (!onProgress || total <= 0) return;
+  const percent = Math.round((processed / total) * 100);
+  if (processed >= total) {
+    onProgress(`Scanning pack objects: 100% (${total}/${total}), done.\n`);
+    return;
+  }
+  onProgress(`Scanning pack objects: ${percent}% (${processed}/${total})\r`);
+}
 
 function isReservedPackType(type: number): boolean {
   return type === 0 || type === 5;
@@ -300,6 +315,7 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
   const objectCount = hdv.getUint32(8, false);
   validatePackObjectCount(packSize, objectCount);
   log.info("scan:start", { packKey, packSize, objectCount });
+  opts.onProgress?.(`Scanning pack objects: 0% (0/${objectCount})\r`);
 
   // ---- 2. Allocate entry table ----
   const table = allocateEntryTable(objectCount);
@@ -314,6 +330,7 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
   await digestWriter.write(headerBuf);
 
   const inflator = new InflateCursor();
+  const progressInterval = Math.max(1, Math.floor(objectCount / SCAN_PROGRESS_STEPS));
 
   // ---- 4. Sequential scan of all entries ----
   for (let i = 0; i < objectCount; i++) {
@@ -424,6 +441,9 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
     // Log progress periodically.
     if ((i + 1) % 10000 === 0 || i + 1 === objectCount) {
       log.debug("scan:progress", { processed: i + 1, total: objectCount });
+    }
+    if ((i + 1) % progressInterval === 0 || i + 1 === objectCount) {
+      emitScanProgress(opts.onProgress, i + 1, objectCount);
     }
   }
 
