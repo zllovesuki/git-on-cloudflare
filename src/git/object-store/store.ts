@@ -1,6 +1,8 @@
 import type { CacheContext } from "@/cache/index.ts";
 import type { Logger } from "@/common/logger.ts";
 import type { PackedObjectResult } from "./types.ts";
+import type { Limiter } from "@/git/operations/limits.ts";
+import type { PackHeaderEx } from "@/git/pack/packMeta.ts";
 
 import { createBlobFromBytes, inflate } from "@/common/index.ts";
 import { parseCommitRefs, parseTagTarget, parseTreeChildOids } from "@/git/core/index.ts";
@@ -10,9 +12,8 @@ import {
   getLimiter,
 } from "@/git/operations/limits.ts";
 import { readPackHeaderExFromBuf, readPackRange } from "@/git/pack/packMeta.ts";
-import { loadActivePackCatalog } from "./catalog.ts";
 import { applyGitDelta } from "./delta.ts";
-import { getOidHexAt, findOffsetIndex, getNextOffsetByIndex, loadIdxView } from "./idxView.ts";
+import { findOffsetIndex, getNextOffsetByIndex, getOidHexAt } from "./idxView.ts";
 import { findObject } from "./lookup.ts";
 import {
   ensureMemo,
@@ -40,12 +41,12 @@ function countPackedSubrequest(
 async function readPackedEntry(
   env: Env,
   location: ResolvedLocation,
-  limiter: ReturnType<typeof getLimiter>,
+  limiter: Limiter,
   cacheCtx: CacheContext | undefined,
   log: Logger
 ): Promise<
   | {
-      header: NonNullable<ReturnType<typeof readPackHeaderExFromBuf>>;
+      header: PackHeaderEx;
       compressed: Uint8Array;
     }
   | undefined
@@ -208,31 +209,37 @@ export async function readObjectRefsBatch(
   cacheCtx?: CacheContext
 ): Promise<Map<string, string[]>> {
   const out = new Map<string, string[]>();
-  for (const oid of oids) {
-    const obj = await readObject(env, repoId, oid, cacheCtx);
-    if (!obj) {
-      // Omit missing objects so callers can still fall back to the compatibility
-      // loose-object shim during mixed shadow-read rollout states.
-      continue;
+  for (let index = 0; index < oids.length; index += MAX_SIMULTANEOUS_CONNECTIONS) {
+    const batch = oids.slice(index, index + MAX_SIMULTANEOUS_CONNECTIONS);
+    const objects = await Promise.all(batch.map((oid) => readObject(env, repoId, oid, cacheCtx)));
+
+    for (let batchIndex = 0; batchIndex < batch.length; batchIndex++) {
+      const oid = batch[batchIndex];
+      const obj = objects[batchIndex];
+      if (!obj) {
+        // Omit missing objects so fetch closure can return the partial pack-first
+        // result it actually discovered instead of inventing compatibility reads.
+        continue;
+      }
+      if (obj.type === "commit") {
+        const refs = parseCommitRefs(obj.payload);
+        out.set(
+          oid,
+          [refs.tree, ...refs.parents].filter((value): value is string => !!value)
+        );
+        continue;
+      }
+      if (obj.type === "tree") {
+        out.set(oid, parseTreeChildOids(obj.payload));
+        continue;
+      }
+      if (obj.type === "tag") {
+        const tag = parseTagTarget(obj.payload);
+        out.set(oid, tag?.targetOid ? [tag.targetOid] : []);
+        continue;
+      }
+      out.set(oid, []);
     }
-    if (obj.type === "commit") {
-      const refs = parseCommitRefs(obj.payload);
-      out.set(
-        oid,
-        [refs.tree, ...refs.parents].filter((value): value is string => !!value)
-      );
-      continue;
-    }
-    if (obj.type === "tree") {
-      out.set(oid, parseTreeChildOids(obj.payload));
-      continue;
-    }
-    if (obj.type === "tag") {
-      const tag = parseTagTarget(obj.payload);
-      out.set(oid, tag?.targetOid ? [tag.targetOid] : []);
-      continue;
-    }
-    out.set(oid, []);
   }
   return out;
 }
@@ -252,20 +259,6 @@ export async function readBlobStream(
       ETag: `"${obj.oid}"`,
     },
   });
-}
-
-export async function* iterPackOids(
-  env: Env,
-  repoId: string,
-  packKey: string,
-  cacheCtx?: CacheContext
-): AsyncGenerator<string> {
-  const packs = await loadActivePackCatalog(env, repoId, cacheCtx);
-  const pack = packs.find((row) => row.packKey === packKey);
-  if (!pack) return;
-  const idx = await loadIdxView(env, packKey, cacheCtx, pack.packBytes);
-  if (!idx) return;
-  for (let i = 0; i < idx.count; i++) yield getOidHexAt(idx, i);
 }
 
 export { findObject } from "./lookup.ts";

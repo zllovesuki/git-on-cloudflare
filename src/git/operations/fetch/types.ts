@@ -1,36 +1,28 @@
 import type { CacheContext } from "@/cache/index.ts";
+import type { IdxView } from "@/git/object-store/types.ts";
 
-export type AssemblerPlan =
-  | {
-      type: "InitCloneUnion";
-      repoId: string;
-      packKeys: string[];
-      needed: string[];
-      wants: string[];
-      ackOids: string[];
-      signal?: AbortSignal;
-      cacheCtx?: CacheContext;
-    }
-  | {
-      type: "IncrementalSingle";
-      repoId: string;
-      packKey: string;
-      needed: string[];
-      ackOids: string[];
-      signal?: AbortSignal;
-      cacheCtx?: CacheContext;
-    }
-  | {
-      type: "IncrementalMulti";
-      repoId: string;
-      packKeys: string[];
-      needed: string[];
-      ackOids: string[];
-      signal?: AbortSignal;
-      cacheCtx?: CacheContext;
-    }
+export type OrderedPackSnapshotEntry = {
+  packKey: string;
+  packBytes: number;
+  idx: IdxView;
+};
+
+export type OrderedPackSnapshot = {
+  packs: OrderedPackSnapshotEntry[];
+};
+
+export type ServeUploadPackPlan = {
+  type: "Serve";
+  repoId: string;
+  snapshot: OrderedPackSnapshot;
+  neededOids: string[];
+  ackOids: string[];
+  signal?: AbortSignal;
+  cacheCtx?: CacheContext;
+};
+
+export type UploadPackPlan =
+  | ServeUploadPackPlan
   | {
       type: "RepositoryNotReady";
     };
-
-export type ResolvedAssemblerPlan = Exclude<AssemblerPlan, { type: "RepositoryNotReady" }>;

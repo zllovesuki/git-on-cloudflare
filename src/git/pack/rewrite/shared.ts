@@ -1,0 +1,303 @@
+import type {
+  OrderedPackSnapshot,
+  OrderedPackSnapshotEntry,
+} from "@/git/operations/fetch/types.ts";
+import type { Logger } from "@/common/logger.ts";
+import type { Limiter } from "@/git/operations/limits.ts";
+import type { PackHeaderEx } from "../packMeta.ts";
+
+import { createLogger } from "@/common/index.ts";
+import { findOidIndex } from "@/git/object-store/index.ts";
+import { SequentialReader } from "@/git/pack/indexer/resolve/reader.ts";
+import { readPackHeaderExFromBuf, readPackRange } from "../packMeta.ts";
+
+export const HEADER_READ_BYTES = 128;
+export const DEFAULT_CHUNK_SIZE = 4_194_304;
+export const WHOLE_PACK_MAX_BYTES = 8 * 1024 * 1024;
+export const WHOLE_PACK_TOTAL_BUDGET = 32 * 1024 * 1024;
+export const HEADER_STABILITY_CAP = 16;
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+export type RewriteOptions = {
+  signal?: AbortSignal;
+  limiter?: Limiter;
+  countSubrequest?: (n?: number) => boolean | void;
+  onProgress?: (msg: string) => void;
+};
+
+// ---------------------------------------------------------------------------
+// SelectionTable — struct-of-arrays for selected pack entries
+// ---------------------------------------------------------------------------
+
+/**
+ * Flat typed-array representation of selected pack entries, modeled after
+ * the `PackEntryTable` pattern in `src/git/pack/indexer/types.ts`.
+ *
+ * Every field is indexed by a selection slot (`sel`). The table grows on
+ * demand when delta-base chasing discovers bases beyond the initial
+ * `neededOids` set.
+ */
+export interface SelectionTable {
+  count: number;
+  capacity: number;
+
+  /* identity — set during resolve */
+  packSlots: Uint8Array;
+  entryIndices: Uint32Array;
+  offsets: Float64Array;
+  nextOffsets: Float64Array;
+
+  /* header data — set during header-read pass */
+  typeCodes: Uint8Array;
+  headerLens: Uint16Array;
+  payloadLens: Float64Array;
+  sizeVarBuf: Uint8Array; // capacity * 5, concatenated varint bytes
+  sizeVarLens: Uint8Array; // 1–5 per entry
+
+  /* delta relationships */
+  baseSlots: Int32Array; // sel of base, -1 = non-delta
+  baseOidRaw: Uint8Array | null; // lazy; capacity * 20, for REF_DELTA
+  queuedForHeader: Uint8Array; // 1 = already queued for header read
+
+  /* output layout — set during convergence / topology sort */
+  outputOffsets: Float64Array;
+  outputHeaderLens: Uint16Array;
+  outputOrder: Uint32Array; // topology-sorted selection indices
+}
+
+export function allocateSelectionTable(capacity: number): SelectionTable {
+  return {
+    count: 0,
+    capacity,
+    packSlots: new Uint8Array(capacity),
+    entryIndices: new Uint32Array(capacity),
+    offsets: new Float64Array(capacity),
+    nextOffsets: new Float64Array(capacity),
+    typeCodes: new Uint8Array(capacity),
+    headerLens: new Uint16Array(capacity),
+    payloadLens: new Float64Array(capacity),
+    sizeVarBuf: new Uint8Array(capacity * 5),
+    sizeVarLens: new Uint8Array(capacity),
+    baseSlots: new Int32Array(capacity).fill(-1),
+    baseOidRaw: null, // allocated lazily on first REF_DELTA
+    queuedForHeader: new Uint8Array(capacity),
+    outputOffsets: new Float64Array(capacity),
+    outputHeaderLens: new Uint16Array(capacity),
+    outputOrder: new Uint32Array(capacity),
+  };
+}
+
+/** Double the table capacity, preserving existing data. */
+export function growSelectionTable(table: SelectionTable): void {
+  const next = Math.max(table.capacity * 2, 64);
+
+  function grow<T extends ArrayLike<number> & { set(src: T): void }>(
+    old: T,
+    ctor: new (len: number) => T,
+    len: number
+  ): T {
+    const arr = new ctor(len);
+    arr.set(old);
+    return arr;
+  }
+
+  table.packSlots = grow(table.packSlots, Uint8Array, next);
+  table.entryIndices = grow(table.entryIndices, Uint32Array, next);
+  table.offsets = grow(table.offsets, Float64Array, next);
+  table.nextOffsets = grow(table.nextOffsets, Float64Array, next);
+  table.typeCodes = grow(table.typeCodes, Uint8Array, next);
+  table.headerLens = grow(table.headerLens, Uint16Array, next);
+  table.payloadLens = grow(table.payloadLens, Float64Array, next);
+  table.sizeVarLens = grow(table.sizeVarLens, Uint8Array, next);
+  table.outputOffsets = grow(table.outputOffsets, Float64Array, next);
+  table.outputHeaderLens = grow(table.outputHeaderLens, Uint16Array, next);
+  table.outputOrder = grow(table.outputOrder, Uint32Array, next);
+
+  table.queuedForHeader = grow(table.queuedForHeader, Uint8Array, next);
+
+  // sizeVarBuf is capacity * 5
+  const oldSvBuf = table.sizeVarBuf;
+  table.sizeVarBuf = new Uint8Array(next * 5);
+  table.sizeVarBuf.set(oldSvBuf);
+
+  // baseSlots: new slots default to -1
+  const oldBaseSlots = table.baseSlots;
+  table.baseSlots = new Int32Array(next).fill(-1);
+  table.baseSlots.set(oldBaseSlots);
+
+  // baseOidRaw: grow only if already allocated
+  if (table.baseOidRaw) {
+    const oldRaw = table.baseOidRaw;
+    table.baseOidRaw = new Uint8Array(next * 20);
+    table.baseOidRaw.set(oldRaw);
+  }
+
+  table.capacity = next;
+}
+
+// ---------------------------------------------------------------------------
+// Dedup key — packed integer instead of string
+// ---------------------------------------------------------------------------
+
+/** Pack (packSlot, entryIndex) into a single number for Map<number, number>. */
+export function selectionKey(packSlot: number, entryIndex: number): number {
+  return packSlot * 0x1_0000_0000 + entryIndex;
+}
+
+// ---------------------------------------------------------------------------
+// PackReadState — per-pack reader and optional whole-pack buffer
+// ---------------------------------------------------------------------------
+
+export type PackReadState = {
+  pack: OrderedPackSnapshotEntry;
+  reader: SequentialReader;
+  wholePack?: Uint8Array;
+};
+
+export function buildPackHeader(objectCount: number): Uint8Array {
+  const header = new Uint8Array(12);
+  header.set(new TextEncoder().encode("PACK"), 0);
+  const view = new DataView(header.buffer);
+  view.setUint32(4, 2);
+  view.setUint32(8, objectCount);
+  return header;
+}
+
+export function countRewriteSubrequest(
+  log: Logger,
+  warnedFlags: Set<string>,
+  options: RewriteOptions | undefined,
+  flag: string,
+  details: Record<string, unknown>,
+  n?: number
+): boolean | void {
+  const withinBudget = options?.countSubrequest?.(n);
+  if (withinBudget === false && !warnedFlags.has(flag)) {
+    warnedFlags.add(flag);
+    log.warn("soft-budget-exhausted", details);
+  }
+  return withinBudget;
+}
+
+function getRequiredLimiter(options?: RewriteOptions): Limiter {
+  if (!options?.limiter) {
+    throw new Error("rewrite: limiter required");
+  }
+  return options.limiter;
+}
+
+async function loadWholePack(
+  env: Env,
+  pack: OrderedPackSnapshotEntry,
+  log: Logger,
+  warnedFlags: Set<string>,
+  options?: RewriteOptions
+): Promise<Uint8Array | undefined> {
+  return await readPackRange(env, pack.packKey, 0, pack.packBytes, {
+    limiter: getRequiredLimiter(options),
+    signal: options?.signal,
+    countSubrequest: (n?: number) =>
+      countRewriteSubrequest(
+        log,
+        warnedFlags,
+        options,
+        `rewrite-whole-pack:${pack.packKey}`,
+        { op: "r2:get-range", packKey: pack.packKey },
+        n
+      ),
+  });
+}
+
+function createPackReadState(
+  env: Env,
+  pack: OrderedPackSnapshotEntry,
+  log: Logger,
+  warnedFlags: Set<string>,
+  options?: RewriteOptions
+): PackReadState {
+  const readerLog = createLogger(env.LOG_LEVEL, { service: "RewritePackReader" });
+  return {
+    pack,
+    reader: new SequentialReader(
+      env,
+      pack.packKey,
+      pack.packBytes,
+      DEFAULT_CHUNK_SIZE,
+      getRequiredLimiter(options),
+      (n?: number) =>
+        countRewriteSubrequest(
+          log,
+          warnedFlags,
+          options,
+          `rewrite-range:${pack.packKey}`,
+          { op: "r2:get-range", packKey: pack.packKey },
+          n
+        ),
+      readerLog,
+      options?.signal
+    ),
+  };
+}
+
+export async function ensurePackReadState(
+  env: Env,
+  pack: OrderedPackSnapshotEntry,
+  packSlot: number,
+  readerStates: Map<number, PackReadState>,
+  log: Logger,
+  warnedFlags: Set<string>,
+  options?: RewriteOptions
+): Promise<PackReadState> {
+  const existing = readerStates.get(packSlot);
+  if (existing) return existing;
+
+  const state = createPackReadState(env, pack, log, warnedFlags, options);
+  if (pack.packBytes <= WHOLE_PACK_MAX_BYTES) {
+    let loaded = 0;
+    for (const s of readerStates.values()) {
+      if (s.wholePack) loaded += s.wholePack.length;
+    }
+    if (loaded + pack.packBytes <= WHOLE_PACK_TOTAL_BUDGET) {
+      state.wholePack = await loadWholePack(env, pack, log, warnedFlags, options);
+    }
+  }
+  readerStates.set(packSlot, state);
+  return state;
+}
+
+/**
+ * Read a pack entry header at the given byte offset.
+ * For the wholePack path the subarray is stable; for the SequentialReader
+ * path the returned `sizeVarBytes` references the reader buffer and must
+ * be copied before the next preload.
+ */
+export async function readSelectedHeader(
+  state: PackReadState,
+  offset: number
+): Promise<PackHeaderEx | undefined> {
+  if (state.wholePack) {
+    return readPackHeaderExFromBuf(state.wholePack, offset);
+  }
+
+  const bytesLeft = Math.max(0, state.pack.packBytes - offset);
+  const headerBytes = await state.reader.readRange(offset, Math.min(HEADER_READ_BYTES, bytesLeft));
+  return readPackHeaderExFromBuf(headerBytes, 0);
+}
+
+/** Search packs in snapshot order; first match wins (duplicate selection). */
+export function resolveOrderedEntryByOid(
+  snapshot: OrderedPackSnapshot,
+  oid: string | Uint8Array
+): { packSlot: number; pack: OrderedPackSnapshotEntry; entryIndex: number } | undefined {
+  for (let packSlot = 0; packSlot < snapshot.packs.length; packSlot++) {
+    const pack = snapshot.packs[packSlot];
+    const entryIndex = findOidIndex(pack.idx, oid);
+    if (entryIndex >= 0) {
+      return { packSlot, pack, entryIndex };
+    }
+  }
+  return undefined;
+}

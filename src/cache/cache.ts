@@ -25,12 +25,6 @@ export interface RequestMemo {
   objects?: Map<string, { type: string; payload: Uint8Array } | undefined>;
   /** Parsed references for objects: commit -> [tree, parents], tree -> [entries] */
   refs?: Map<string, string[]>;
-  /** Candidate pack list for the current repo (once per request) */
-  packList?: string[];
-  /** In-flight promise for candidate pack list to coalesce concurrent discovery */
-  packListPromise?: Promise<string[]>;
-  /** Pack OIDs by pack key */
-  packOids?: Map<string, Set<string>>;
   /** Active pack catalog snapshot for the current repo */
   packCatalog?: PackCatalogRow[];
   /** In-flight promise for the active pack catalog */
@@ -51,7 +45,7 @@ export interface RequestMemo {
   flags?: Set<string>;
   /** Count of compatibility loose-object RPC reads (stub.getObject) within this request */
   loaderCalls?: number;
-  /** Soft cap for compatibility loose-object RPC reads; can be adjusted between phases */
+  /** Soft cap for compatibility loose-object RPC reads within this request */
   loaderCap?: number;
   /** Optional per-request soft subrequest budget to degrade before hitting platform hard limits */
   subreqBudget?: number;

@@ -23,7 +23,7 @@ function buildFetchBody({
   return concatChunks(chunks);
 }
 
-it("upload-pack fetch returns acknowledgments then packfile (two-phase)", async () => {
+it("upload-pack fetch returns acknowledgments before the final packfile response", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r");
   const repoId = `${owner}/${repo}`;
@@ -36,7 +36,7 @@ it("upload-pack fetch returns acknowledgments then packfile (two-phase)", async 
 
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-  // Phase 1: negotiation (done=false) should return only acknowledgments
+  // Negotiation (done=false) should return only acknowledgments.
   const negotiateBody = buildFetchBody({ wants: [commitOid], done: false });
   const negotiateRes = await SELF.fetch(url, {
     method: "POST",
@@ -52,7 +52,7 @@ it("upload-pack fetch returns acknowledgments then packfile (two-phase)", async 
   expect(negotiateText.includes("acknowledgments\n")).toBe(true);
   expect(negotiateText.includes("packfile\n")).toBe(false);
 
-  // Phase 2: final fetch (done=true) should return packfile without acknowledgments
+  // The final fetch (done=true) should return the packfile without acknowledgments.
   const fetchBody = buildFetchBody({ wants: [commitOid], done: true });
   const fetchRes = await SELF.fetch(url, {
     method: "POST",

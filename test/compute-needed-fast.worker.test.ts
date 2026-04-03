@@ -2,7 +2,7 @@ import { it, expect, describe } from "vitest";
 import { env } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import type { CacheContext } from "@/cache/index.ts";
-import { computeNeededFast } from "@/git/operations/uploadStream.ts";
+import { computeNeededFast } from "@/git/operations/fetch/neededFast.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 describe("computeNeededFast", () => {
@@ -62,7 +62,7 @@ describe("computeNeededFast", () => {
     expect(needed3.length).toBe(2);
   });
 
-  it("handles timeout gracefully", async () => {
+  it("returns the partial closure when the traversal times out", async () => {
     const owner = "o";
     const repo = uniqueRepoId("closure-timeout");
     const repoId = `${owner}/${repo}`;
@@ -82,15 +82,20 @@ describe("computeNeededFast", () => {
       async (instance: RepoDurableObject) => instance.seedMinimalRepo()
     );
 
-    // Mock a very short timeout by pre-setting the loader-capped flag
-    cacheCtx.memo!.flags!.add("loader-capped");
+    const realNow = Date.now;
+    let nowCalls = 0;
+    Date.now = () => {
+      nowCalls++;
+      return nowCalls === 1 ? 0 : 50_000;
+    };
 
-    const needed = await computeNeededFast(env, repoId, [commitOid], [], cacheCtx);
-
-    // Should have set the timeout flag
-    expect(cacheCtx.memo!.flags!.has("closure-timeout")).toBe(true);
-    // Should return partial results
-    expect(needed.length).toBeGreaterThanOrEqual(0);
+    try {
+      const needed = await computeNeededFast(env, repoId, [commitOid], [], cacheCtx);
+      expect(cacheCtx.memo!.flags!.has("closure-timeout")).toBe(true);
+      expect(Array.isArray(needed)).toBe(true);
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   it("uses memoization effectively", async () => {

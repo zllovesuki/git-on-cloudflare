@@ -11,17 +11,3 @@ export function repositoryNotReadyResponse(): Response {
     }
   );
 }
-
-export function fetchPlanFailedResponse(): Response {
-  return new Response(
-    "Server temporarily unable to create fetch plan. Please retry in a few moments.\n",
-    {
-      status: 503,
-      headers: {
-        "Retry-After": "5",
-        "Content-Type": "text/plain; charset=utf-8",
-        "X-Git-Error": "fetch-plan-failed",
-      },
-    }
-  );
-}

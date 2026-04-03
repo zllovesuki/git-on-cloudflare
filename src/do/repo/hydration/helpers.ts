@@ -1,22 +1,11 @@
-import type {
-  HydrationCtx,
-  HydrationPlan,
-  StageHandlerResult,
-  StageHandler,
-  PackHeaderEx,
-} from "./types.ts";
-import type {
-  RepoStateSchema,
-  HydrationWork,
-  HydrationStage,
-  HydrationReason,
-} from "../repoState.ts";
+import type { RepoStateSchema, HydrationWork, HydrationStage, TypedStorage } from "../repoState.ts";
 import type { Logger } from "@/common/logger.ts";
+import type { IdxView } from "@/git/object-store/types.ts";
 
 import { createLogger } from "@/common/index.ts";
+import { findOffsetIndex, findOidIndex, getOidHexAt } from "@/git/object-store/index.ts";
 import { getDoIdFromPath } from "@/keys.ts";
 import { getConfig } from "../repoConfig.ts";
-import { asTypedStorage, objKey } from "../repoState.ts";
 import {
   getDb,
   hasHydrCoverForWork,
@@ -34,6 +23,24 @@ export const HYDR_MAX_OBJS_PER_SEGMENT = 2000;
 export const HYDR_EST_COMPRESSION_RATIO = 0.6;
 export const PACK_TYPE_OFS_DELTA = 6 as const;
 export const PACK_TYPE_REF_DELTA = 7 as const;
+
+export type HydrationConfig = {
+  unpackMaxMs: number;
+  unpackDelayMs: number;
+  unpackBackoffMs: number;
+  chunk: number;
+  keepPacks: number;
+  windowMax: number;
+};
+export type HydrationStore = TypedStorage<RepoStateSchema>;
+export type HydrationPhysicalIndex = {
+  idxView: IdxView;
+  sortedOffsets: Float64Array;
+  getOidAtIndex(index: number): string;
+  findIndexByOffset(offset: number): number | undefined;
+  findIndexByOid(oid: string): number | undefined;
+  hasOid(oid: string): boolean;
+};
 
 export function nowMs() {
   return Date.now();
@@ -69,8 +76,8 @@ export function buildRecentWindowKeys(
 }
 
 export async function computeStableHydrationWindow(
-  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
-  cfg: ReturnType<typeof getHydrConfig>
+  store: HydrationStore,
+  cfg: HydrationConfig
 ): Promise<{ window: string[]; lastPackKey: string | null }> {
   const lastPackKey = (await store.get("lastPackKey")) || null;
   const packListRaw = (await store.get("packList")) || [];
@@ -97,8 +104,8 @@ export async function computeStableHydrationWindow(
 
 export async function ensureHydrCoverForWork(
   state: DurableObjectState,
-  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
-  cfg: ReturnType<typeof getHydrConfig>,
+  store: HydrationStore,
+  cfg: HydrationConfig,
   workId: string
 ): Promise<void> {
   if (!workId) return;
@@ -132,8 +139,8 @@ export async function ensureHydrCoverForWork(
 
 export async function buildHydrationCoverageSet(
   state: DurableObjectState,
-  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
-  cfg: ReturnType<typeof getHydrConfig>
+  store: HydrationStore,
+  cfg: HydrationConfig
 ): Promise<Set<string>> {
   const covered = new Set<string>();
   try {
@@ -178,11 +185,22 @@ export function clearError(work: HydrationWork) {
   if (work.error) work.error = undefined;
 }
 
-export function buildPhysicalIndex(parsed: { oids: string[]; offsets: number[] }) {
-  const { oids, offsets } = parsed;
-  const oidsSet = new Set(oids.map((x) => x.toLowerCase()));
-  const sorted = offsets.slice().sort((a, b) => a - b);
-  const offToIdx = new Map<number, number>();
-  for (let i = 0; i < offsets.length; i++) offToIdx.set(offsets[i], i);
-  return { oids, offsets, oidsSet, sorted, offToIdx };
+export function buildPhysicalIndex(idxView: IdxView): HydrationPhysicalIndex {
+  return {
+    idxView,
+    sortedOffsets: idxView.sortedOffsets,
+    getOidAtIndex(index: number) {
+      return getOidHexAt(idxView, index);
+    },
+    findIndexByOffset(offset: number) {
+      return findOffsetIndex(idxView, offset);
+    },
+    findIndexByOid(oid: string) {
+      const index = findOidIndex(idxView, oid);
+      return index >= 0 ? index : undefined;
+    },
+    hasOid(oid: string) {
+      return findOidIndex(idxView, oid) >= 0;
+    },
+  };
 }

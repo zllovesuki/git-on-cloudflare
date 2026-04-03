@@ -14,8 +14,8 @@ import {
   buildPhysicalIndex,
 } from "./helpers.ts";
 import { asTypedStorage } from "../repoState.ts";
-import { getDb, deletePackObjects } from "../db/index.ts";
-import { loadIdxParsed } from "@/git/pack/idxCache.ts";
+import { getDb, deletePackObjects, getPackCatalogRow } from "../db/index.ts";
+import { loadIdxView } from "@/git/object-store/index.ts";
 import { readPackHeaderEx } from "@/git/pack/index.ts";
 import { createLogger } from "@/common/index.ts";
 import { packIndexKey } from "@/keys.ts";
@@ -29,6 +29,7 @@ export async function summarizeHydrationPlan(
   const log = makeHydrationLogger(env, prefix);
   const store = asTypedStorage<RepoStateSchema>(state.storage);
   const cfg = getHydrConfig(env);
+  const db = getDb(state.storage);
 
   const lastPackKey = (await store.get("lastPackKey")) || null;
   const packListRaw = (await store.get("packList")) || [];
@@ -43,27 +44,31 @@ export async function summarizeHydrationPlan(
   try {
     const SAMPLE_PER_PACK = HYDR_SAMPLE_PER_PACK;
     for (const key of window) {
-      const parsed = await loadIdxParsed(env, key);
-      if (!parsed) continue;
-      const phys = buildPhysicalIndex(parsed);
-      const stride = Math.max(1, Math.floor(phys.sorted.length / SAMPLE_PER_PACK));
+      const packRow = await getPackCatalogRow(db, key);
+      if (!packRow) continue;
+
+      const idx = await loadIdxView(env, key, undefined, packRow.packBytes);
+      if (!idx) continue;
+
+      const phys = buildPhysicalIndex(idx);
+      const stride = Math.max(1, Math.floor(phys.sortedOffsets.length / SAMPLE_PER_PACK));
       let count = 0;
-      for (let i = 0; i < phys.sorted.length && count < SAMPLE_PER_PACK; i += stride) {
-        const off = phys.sorted[i];
+      for (let i = 0; i < phys.sortedOffsets.length && count < SAMPLE_PER_PACK; i += stride) {
+        const off = phys.sortedOffsets[i];
         const header = await readPackHeaderEx(env, key, off);
         if (!header) continue;
         examinedObjects++;
         let baseOid: string | undefined;
         if (header.type === PACK_TYPE_OFS_DELTA) {
           const baseOff = off - (header.baseRel || 0);
-          const baseIdx = phys.offToIdx.get(baseOff);
-          if (baseIdx !== undefined) baseOid = phys.oids[baseIdx];
+          const baseIdx = phys.findIndexByOffset(baseOff);
+          if (baseIdx !== undefined) baseOid = phys.getOidAtIndex(baseIdx);
         } else if (header.type === PACK_TYPE_REF_DELTA) {
           baseOid = header.baseOid;
         }
         if (baseOid) {
           const q = baseOid.toLowerCase();
-          if (!phys.oidsSet.has(q) || !covered.has(q)) {
+          if (!phys.hasOid(q) || !covered.has(q)) {
             baseCandidates.add(q);
           }
         }

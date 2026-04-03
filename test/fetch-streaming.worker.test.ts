@@ -44,28 +44,21 @@ describe("git fetch streaming (default)", () => {
     const repo = uniqueRepoId("streaming");
     const repoId = `${owner}/${repo}`;
 
-    // Seed a repository with some commits and ensure they're packed
+    // Seed a repository with some commits
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid } = await runDOWithRetry(
       () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => {
-        const result = await instance.seedMinimalRepo();
-        // Force packing by triggering maintenance (if available)
-        // or just accept fallback to buffered mode for now
-        return result;
-      }
+      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
     );
 
     const body = buildFetchBody({ wants: [commitOid], done: true });
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-    // Test streaming (now default, no header needed)
     const res = await SELF.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
         "Git-Protocol": "version=2",
-        // No X-Git-Streaming header needed - streaming is now default
       },
       body,
     } as any);
@@ -75,7 +68,6 @@ describe("git fetch streaming (default)", () => {
 
     const bytes = new Uint8Array(await res.arrayBuffer());
 
-    // The response is in pkt-line format, we need to decode it first
     const lines = decodePktLines(bytes);
     let hasAcknowledgments = false;
     let hasPackfile = false;
@@ -83,17 +75,7 @@ describe("git fetch streaming (default)", () => {
     const packData: Uint8Array[] = [];
     let hasSideband = false;
 
-    // Debug: log what lines we're actually getting
-    // console.log("Decoded pkt-lines:");
     for (const line of lines) {
-      // if (line.type === "line") {
-      //   console.log(`  Line: "${line.text?.replace(/\n/g, "\\n")}"`);
-      // } else if (line.type === "flush") {
-      //   console.log("  Flush packet");
-      // } else if (line.type === "delim") {
-      //   console.log("  Delimiter packet");
-      // }
-
       if (line.type === "line" && line.text === "acknowledgments\n") {
         hasAcknowledgments = true;
       }
@@ -103,16 +85,12 @@ describe("git fetch streaming (default)", () => {
       }
     }
 
-    // Verify response structure
-    // When done=true is sent without negotiation, the response goes straight to packfile
     expect(
       hasAcknowledgments,
       "Response should NOT contain 'acknowledgments\\n' when done=true"
     ).toBe(false);
     expect(hasPackfile, "Response should contain 'packfile\\n' pkt-line").toBe(true);
 
-    // Parse and extract pack data
-    // Note: With fallback to buffered mode for loose objects, we may not get sideband encoding
     for (const line of lines) {
       if (line.type === "line" && line.text === "packfile\n") {
         inPackfile = true;
@@ -131,17 +109,8 @@ describe("git fetch streaming (default)", () => {
       }
     }
 
-    // If no sideband data found, it means we fell back to buffered mode
-    // Extract pack directly from the response
-    let pack: Uint8Array;
-    if (packData.length > 0) {
-      pack = concatChunks(packData);
-    } else {
-      // Fallback: find PACK signature in raw bytes (buffered mode)
-      const packStart = findBytes(bytes, new TextEncoder().encode("PACK"));
-      expect(packStart).toBeGreaterThan(-1);
-      pack = bytes.subarray(packStart);
-    }
+    expect(hasSideband).toBe(true);
+    const pack = concatChunks(packData);
 
     expect(pack.length).toBeGreaterThan(0);
 
@@ -162,73 +131,6 @@ describe("git fetch streaming (default)", () => {
     const expectedSha = pack.subarray(pack.length - 20);
     const actualSha = new Uint8Array(await crypto.subtle.digest("SHA-1", asBufferSource(packBody)));
     expect(Array.from(actualSha)).toEqual(Array.from(expectedSha));
-  });
-
-  it("uses buffered mode with X-Git-Streaming: false header", async () => {
-    const owner = "o";
-    const repo = uniqueRepoId("buffered");
-    const repoId = `${owner}/${repo}`;
-
-    // Seed a repository with some commits
-    const id = env.REPO_DO.idFromName(repoId);
-    const { commitOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => instance.seedMinimalRepo()
-    );
-
-    const body = buildFetchBody({ wants: [commitOid], done: true });
-    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-
-    // Test with explicit buffered mode (deprecated)
-    const res = await SELF.fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        "Git-Protocol": "version=2",
-        "X-Git-Streaming": "false", // Force buffered mode (deprecated)
-      },
-      body,
-    } as any);
-
-    expect(res.status).toBe(200);
-    expect(res.headers.get("Content-Type")).toContain("git-upload-pack-result");
-
-    const bytes = new Uint8Array(await res.arrayBuffer());
-
-    // The response is in pkt-line format, decode it
-    const lines = decodePktLines(bytes);
-    let hasAcknowledgments = false;
-    let hasPackfile = false;
-
-    for (const line of lines) {
-      if (line.type === "line" && line.text === "acknowledgments\n") {
-        hasAcknowledgments = true;
-      }
-      if (line.type === "line" && line.text === "packfile\n") {
-        hasPackfile = true;
-      }
-    }
-
-    // Verify response structure (buffered mode doesn't use sideband)
-    // When done=true, response goes straight to packfile without acknowledgments
-    expect(
-      hasAcknowledgments,
-      "Buffered response should NOT contain 'acknowledgments\\n' when done=true"
-    ).toBe(false);
-    expect(hasPackfile, "Buffered response should contain 'packfile\\n' pkt-line").toBe(true);
-
-    // Find the pack data (starts with "PACK")
-    const packStart = findBytes(bytes, new TextEncoder().encode("PACK"));
-    expect(packStart).toBeGreaterThan(-1);
-
-    const pack = bytes.subarray(packStart);
-
-    // Verify pack header
-    const dv = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
-    const version = dv.getUint32(4);
-    const objCount = dv.getUint32(8);
-    expect(version).toBe(2);
-    expect(objCount).toBeGreaterThan(0);
   });
 
   it("handles incremental fetch with haves", async () => {
@@ -371,7 +273,6 @@ describe("git fetch streaming (default)", () => {
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
         "Git-Protocol": "version=2",
-        "X-Git-Streaming": "true",
       },
       body,
     } as any);
@@ -486,7 +387,6 @@ describe("git fetch streaming (default)", () => {
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
         "Git-Protocol": "version=2",
-        "X-Git-Streaming": "true",
       },
       body,
     } as any);
@@ -526,7 +426,6 @@ describe("git fetch streaming (default)", () => {
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
         "Git-Protocol": "version=2",
-        "X-Git-Streaming": "true",
       },
       body,
       signal: abortController.signal,
@@ -591,7 +490,6 @@ describe("git fetch streaming (default)", () => {
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
         "Git-Protocol": "version=2",
-        "X-Git-Streaming": "true",
       },
       body: corruptedBody,
     } as any);
@@ -685,7 +583,6 @@ describe("git fetch streaming (default)", () => {
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
         "Git-Protocol": "version=2",
-        "X-Git-Streaming": "true",
       },
       body,
     } as any);
@@ -710,11 +607,7 @@ describe("git fetch streaming (default)", () => {
       }
     }
 
-    // If streaming with pack assembly, we should see progress messages
-    // Note: might be empty if it fell back to buffered mode with loose objects
-    console.log("Progress messages:", progressMessages);
-
-    // Verify pack data is present
+    expect(progressMessages.length).toBeGreaterThan(0);
     const packStart = findBytes(bytes, new TextEncoder().encode("PACK"));
     expect(packStart).toBeGreaterThan(-1);
   });
@@ -798,13 +691,11 @@ describe("git fetch streaming (default)", () => {
     const body = buildFetchBody({ wants: [commitOid], done: true });
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-    // Test that streaming returns 503 for repos with no packs
     const res = await SELF.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
         "Git-Protocol": "version=2",
-        // Streaming is default
       },
       body,
     } as any);

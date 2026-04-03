@@ -19,8 +19,8 @@ import {
 import { computeOid } from "@/git/core/objects.ts";
 import { bytesToHex } from "@/common/hex.ts";
 import { DEFAULT_SUBREQUEST_BUDGET } from "@/git/operations/limits.ts";
+import { getOidHexAt, parseIdxView } from "@/git/object-store/index.ts";
 import { packIndexKey } from "@/keys.ts";
-import { parseIdxV2 } from "@/git/pack/packMeta.ts";
 import { getBasePayload } from "@/git/pack/indexer/resolve/materialize.ts";
 import { PayloadLRU } from "@/git/pack/indexer/resolve/payloadCache.ts";
 import { SequentialReader } from "@/git/pack/indexer/resolve/reader.ts";
@@ -87,10 +87,10 @@ describe("resolveDeltasAndWriteIdx OFS_DELTA", () => {
     expect(idxObj).not.toBeNull();
 
     const idxBuf = new Uint8Array(await idxObj!.arrayBuffer());
-    const parsed = parseIdxV2(idxBuf);
-    expect(parsed).not.toBeUndefined();
-    expect(parsed!.oids.length).toBe(2);
-    expect(parsed!.oids).toContain(expectedOid);
+    const idxView = parseIdxView(packKey, idxBuf, head!.size);
+    expect(idxView).not.toBeUndefined();
+    expect(idxView!.count).toBe(2);
+    expect([getOidHexAt(idxView!, 0), getOidHexAt(idxView!, 1)]).toContain(expectedOid);
 
     expect(resolveResult.idxView.count).toBe(2);
     expect(resolveResult.objectCount).toBe(2);

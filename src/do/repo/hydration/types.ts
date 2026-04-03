@@ -1,18 +1,11 @@
-import type {
-  RepoStateSchema,
-  HydrationTask,
-  HydrationWork,
-  HydrationStage,
-  HydrationReason,
-} from "../repoState.ts";
+import type { RepoStateSchema, HydrationWork, TypedStorage } from "../repoState.ts";
 import type { Logger } from "@/common/logger.ts";
-import { asTypedStorage } from "../repoState.ts";
 
 export type HydrationCtx = {
   state: DurableObjectState;
   env: Env;
   prefix: string;
-  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>;
+  store: TypedStorage<RepoStateSchema>;
   cfg: {
     unpackMaxMs: number;
     unpackDelayMs: number;
@@ -47,5 +40,3 @@ export type StageHandlerResult = {
 };
 
 export type StageHandler = (ctx: HydrationCtx, work: HydrationWork) => Promise<StageHandlerResult>;
-
-export type PackHeaderEx = { type: number; baseRel?: number; baseOid?: string };

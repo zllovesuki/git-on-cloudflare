@@ -2,7 +2,6 @@ import type { CacheContext } from "@/cache/index.ts";
 
 import { pktLine } from "@/git/core/index.ts";
 import { createLogger } from "@/common/index.ts";
-import { getPackCandidates } from "../packDiscovery.ts";
 import { getLimiter, countSubrequest } from "../limits.ts";
 import { parseFetchArgs } from "../args.ts";
 import { findCommonHaves } from "../closure.ts";
@@ -17,7 +16,6 @@ import {
   pipePackWithSideband,
 } from "../fetch/sideband.ts";
 
-export { computeNeededFast } from "../fetch/neededFast.ts";
 export * from "../fetch/types.ts";
 
 export async function handleFetchV2Streaming(
@@ -47,14 +45,18 @@ export async function handleFetchV2Streaming(
     return buildAckOnlyResponse(ackOids);
   }
 
-  const packKeys = await getPackCandidates(env, repoId, cacheCtx);
-
-  if (packKeys.length === 0) {
+  const planStart = Date.now();
+  const plan = await planUploadPack(env, repoId, wants, haves, done, signal, cacheCtx);
+  if (plan.type === "RepositoryNotReady") {
     log.warn("stream:fetch:repository-not-ready");
     return repositoryNotReadyResponse();
   }
 
-  log.info("stream:fetch:immediate-stream", { wants: wants.length, haves: haves.length });
+  log.info("stream:fetch:immediate-stream", {
+    wants: wants.length,
+    haves: haves.length,
+    timeMs: Date.now() - planStart,
+  });
 
   const responseStream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -63,27 +65,8 @@ export async function handleFetchV2Streaming(
         controller.enqueue(pktLine("packfile\n"));
         emitProgress(controller, "remote: Preparing pack...\n");
 
-        const planStart = Date.now();
-        const plan = await planUploadPack(env, repoId, wants, haves, done, signal, cacheCtx);
-
-        if (!plan) {
-          emitFatal(controller, "Unable to create fetch plan");
-          controller.close();
-          return;
-        }
-
-        if (plan.type === "RepositoryNotReady") {
-          emitFatal(controller, "Repository not ready - objects are being packed");
-          controller.close();
-          return;
-        }
-
-        const planTime = Date.now() - planStart;
-        streamLog.info("stream:fetch:plan-complete", { type: plan.type, timeMs: planTime });
-
         const progressMux = new SidebandProgressMux();
-        const limiter = plan.cacheCtx ? getLimiter(plan.cacheCtx) : undefined;
-
+        const limiter = getLimiter(plan.cacheCtx);
         const packStream = await resolvePackStream(env, plan, {
           signal: plan.signal,
           limiter,

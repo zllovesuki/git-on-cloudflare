@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
 
 import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
-import { computeNeededFast } from "@/git/operations/uploadStream.ts";
+import { computeNeededFast } from "@/git/operations/fetch/neededFast.ts";
 import {
   callStubWithRetry,
   deleteLooseObjectCopies,

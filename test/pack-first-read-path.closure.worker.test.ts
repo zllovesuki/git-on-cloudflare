@@ -11,7 +11,7 @@ import {
   readObject,
   getNextOffsetByIndex,
 } from "@/git/object-store/index.ts";
-import { computeNeededFast } from "@/git/operations/uploadStream.ts";
+import { computeNeededFast } from "@/git/operations/fetch/neededFast.ts";
 import { hexToBytes } from "@/common/hex.ts";
 import {
   callStubWithRetry,
@@ -98,19 +98,19 @@ describe("pack-first read path closure", () => {
     expect(cacheCtx.memo?.objects?.has(seeded.nextBlob.oid)).not.toBe(true);
   });
 
-  it("falls back to compatibility reads when batch refs miss a loose-only commit", async () => {
-    const repo = uniqueRepoId("pack-needed-fast-compat-fallback");
+  it("keeps loose-only wants as partial results instead of inventing compatibility refs", async () => {
+    const repo = uniqueRepoId("pack-needed-fast-pack-only");
     const repoId = `o/${repo}`;
     const getStub = () =>
       env.REPO_DO.get(env.REPO_DO.idFromName(repoId)) as DurableObjectStub<RepoDurableObject>;
     const author = "You <you@example.com> 0 +0000";
 
-    const blobPayload = new TextEncoder().encode("compat fallback\n");
+    const blobPayload = new TextEncoder().encode("pack only\n");
     const blob = await encodeGitObject("blob", blobPayload);
     const treePayload = buildTreePayload([{ mode: "100644", name: "README.md", oid: blob.oid }]);
     const tree = await encodeGitObject("tree", treePayload);
     const commitPayload = new TextEncoder().encode(
-      `tree ${tree.oid}\n` + `author ${author}\n` + `committer ${author}\n\n` + `compat commit\n`
+      `tree ${tree.oid}\n` + `author ${author}\n` + `committer ${author}\n\n` + `pack only commit\n`
     );
     const commit = await encodeGitObject("commit", commitPayload);
 
@@ -123,7 +123,7 @@ describe("pack-first read path closure", () => {
       env,
       repoId,
       getStub,
-      packs: [{ name: "pack-compat-fallback.pack", packBytes }],
+      packs: [{ name: "pack-needed-fast-pack-only.pack", packBytes }],
       refs: [{ name: "refs/heads/main", oid: commit.oid }],
       head: { target: "refs/heads/main", oid: commit.oid },
       looseObjects: [commit],
@@ -131,59 +131,10 @@ describe("pack-first read path closure", () => {
     await callStubWithRetry(getStub, (stub) => stub.setRepoStorageMode("shadow-read"));
 
     const cacheCtx = createTestCacheContext(`https://example.com/${repoId}/git-upload-pack`);
-    const needed = await computeNeededFast(env, repoId, [commit.oid], [], cacheCtx);
-
-    expect(new Set(needed)).toEqual(new Set([commit.oid, tree.oid, blob.oid]));
-    expect(cacheCtx.memo?.objects?.get(commit.oid)?.type).toBe("commit");
-    expect(cacheCtx.memo?.refs?.get(commit.oid)).toEqual([tree.oid]);
-    expect(cacheCtx.memo?.refs?.get(tree.oid)).toEqual([blob.oid]);
-    expect(cacheCtx.memo?.refs?.get(blob.oid)).toEqual([]);
-  });
-
-  it("caps compatibility fallback reads once the closure loader cap is hit", async () => {
-    const repo = uniqueRepoId("pack-needed-fast-loader-cap");
-    const repoId = `o/${repo}`;
-    const getStub = () =>
-      env.REPO_DO.get(env.REPO_DO.idFromName(repoId)) as DurableObjectStub<RepoDurableObject>;
-    const author = "You <you@example.com> 0 +0000";
-
-    const blobPayload = new TextEncoder().encode("compat capped\n");
-    const blob = await encodeGitObject("blob", blobPayload);
-    const treePayload = buildTreePayload([{ mode: "100644", name: "README.md", oid: blob.oid }]);
-    const tree = await encodeGitObject("tree", treePayload);
-    const commitPayload = new TextEncoder().encode(
-      `tree ${tree.oid}\n` + `author ${author}\n` + `committer ${author}\n\n` + `compat commit\n`
-    );
-    const commit = await encodeGitObject("commit", commitPayload);
-
-    const packBytes = await buildPack([
-      { type: "blob", payload: blobPayload },
-      { type: "tree", payload: treePayload },
-    ]);
-
-    await seedLegacyPackedRepo({
-      env,
-      repoId,
-      getStub,
-      packs: [{ name: "pack-compat-capped.pack", packBytes }],
-      refs: [{ name: "refs/heads/main", oid: commit.oid }],
-      head: { target: "refs/heads/main", oid: commit.oid },
-      looseObjects: [commit],
-    });
-    await callStubWithRetry(getStub, (stub) => stub.setRepoStorageMode("shadow-read"));
-
-    const cacheCtx = createTestCacheContext(`https://example.com/${repoId}/git-upload-pack`);
-    cacheCtx.memo = {
-      ...(cacheCtx.memo || {}),
-      flags: new Set<string>(["no-cache-read"]),
-      loaderCap: 0,
-    };
-
     const needed = await computeNeededFast(env, repoId, [commit.oid], [], cacheCtx);
 
     expect(needed).toEqual([commit.oid]);
-    expect(cacheCtx.memo?.loaderCalls).toBe(1);
-    expect(cacheCtx.memo?.flags?.has("loader-capped")).toBe(true);
+    expect(cacheCtx.memo?.refs?.has(commit.oid)).not.toBe(true);
   });
 
   it("coalesces concurrent idx loads and only decrements the request budget once per pack", async () => {

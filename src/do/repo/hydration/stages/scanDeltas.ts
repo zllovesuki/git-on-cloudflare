@@ -1,10 +1,12 @@
-import type { HydrationCtx, PackHeaderEx, StageHandlerResult } from "../types.ts";
+import type { HydrationCtx, StageHandlerResult } from "../types.ts";
 import type { HydrationWork } from "../../repoState.ts";
+import type { PackHeaderEx } from "@/git/pack/packMeta.ts";
 
 import {
   setStage,
   updateProgress,
   clearError,
+  type HydrationPhysicalIndex,
   HYDR_SOFT_SUBREQ_LIMIT,
   PACK_TYPE_OFS_DELTA,
   PACK_TYPE_REF_DELTA,
@@ -18,8 +20,9 @@ import {
   getHydrPendingCounts,
   insertHydrPendingOids,
   filterUncoveredAgainstHydrCover,
+  getPackCatalogRow,
 } from "../../db/index.ts";
-import { loadIdxParsed } from "@/git/pack/idxCache.ts";
+import { loadIdxView } from "@/git/object-store/index.ts";
 import { readPackHeaderEx } from "@/git/pack/index.ts";
 
 export async function handleStageScanDeltas(
@@ -68,9 +71,16 @@ async function scanDeltasSlice(
 
   while (pIndex < window.length && nowMs() - start < cfg.unpackMaxMs) {
     const key = window[pIndex];
-    let parsed;
+    let idx;
     try {
-      parsed = await loadIdxParsed(env, key);
+      const packRow = await getPackCatalogRow(db, key);
+      if (!packRow) {
+        pIndex++;
+        objCur = 0;
+        log.warn("scan-deltas:missing-pack-catalog-row", { key });
+        continue;
+      }
+      idx = await loadIdxView(env, key, undefined, packRow.packBytes);
       subreq++;
     } catch (e) {
       log.warn("scan-deltas:idx-load-error", { key, error: String(e) });
@@ -79,17 +89,17 @@ async function scanDeltasSlice(
       await insertHydrPendingOids(db, work.workId, "base", Array.from(needBasesSet));
       return "error";
     }
-    if (!parsed) {
+    if (!idx) {
       pIndex++;
       objCur = 0;
       log.warn("scan-deltas:missing-idx", { key });
       continue;
     }
-    const phys = buildPhysicalIndex(parsed);
+    const phys = buildPhysicalIndex(idx);
 
-    const end = Math.min(phys.sorted.length, objCur + cfg.chunk);
+    const end = Math.min(phys.sortedOffsets.length, objCur + cfg.chunk);
     for (let j = objCur; j < end; j++) {
-      const off = phys.sorted[j];
+      const off = phys.sortedOffsets[j];
       let header;
       try {
         header = await readPackHeaderEx(env, key, off);
@@ -105,7 +115,7 @@ async function scanDeltasSlice(
       if (!header) continue;
 
       const chain = await analyzeDeltaChain(ctx, key, header, off, phys, (q: string) => {
-        if (phys.oidsSet.has(q)) inPackCoverageCandidates.add(q);
+        if (phys.hasOid(q)) inPackCoverageCandidates.add(q);
         return false;
       });
       for (const oid of chain) needBasesSet.add(oid);
@@ -134,7 +144,7 @@ async function scanDeltasSlice(
       }
     }
     objCur = end;
-    if (objCur >= phys.sorted.length) {
+    if (objCur >= phys.sortedOffsets.length) {
       pIndex++;
       objCur = 0;
     } else {
@@ -171,7 +181,7 @@ async function analyzeDeltaChain(
   packKey: string,
   header: PackHeaderEx,
   off: number,
-  idx: { offToIdx: Map<number, number>; oids: string[]; offsets: number[]; oidsSet: Set<string> },
+  idx: HydrationPhysicalIndex,
   coveredHas: (q: string) => boolean
 ): Promise<string[]> {
   const chain: string[] = [];
@@ -185,16 +195,16 @@ async function analyzeDeltaChain(
 
     if (currentHeader.type === PACK_TYPE_OFS_DELTA) {
       const baseOff = currentOff - (currentHeader.baseRel || 0);
-      const baseIdx = idx.offToIdx.get(baseOff);
-      if (baseIdx !== undefined) baseOid = idx.oids[baseIdx];
+      const baseIdx = idx.findIndexByOffset(baseOff);
+      if (baseIdx !== undefined) baseOid = idx.getOidAtIndex(baseIdx);
       currentOff = baseOff;
     } else if (currentHeader.type === PACK_TYPE_REF_DELTA) {
       baseOid = currentHeader.baseOid;
       if (baseOid) {
         const searchOid = baseOid.toLowerCase();
-        const baseIdx = idx.oids.findIndex((o) => o.toLowerCase() === searchOid);
-        if (baseIdx >= 0) {
-          currentOff = idx.offsets[baseIdx];
+        const baseIdx = idx.findIndexByOid(searchOid);
+        if (baseIdx !== undefined) {
+          currentOff = idx.idxView.offsets[baseIdx];
         } else {
           if (!coveredHas(searchOid) && !seen.has(searchOid)) {
             chain.push(searchOid);
@@ -210,9 +220,9 @@ async function analyzeDeltaChain(
     if (seen.has(q)) break;
     seen.add(q);
 
-    if (!idx.oidsSet.has(q) || !coveredHas(q)) {
+    if (!idx.hasOid(q) || !coveredHas(q)) {
       chain.push(q);
-      if (!idx.oidsSet.has(q)) break;
+      if (!idx.hasOid(q)) break;
     }
 
     try {
