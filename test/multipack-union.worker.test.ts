@@ -21,9 +21,8 @@ async function readLoose(
   getStub: () => DurableObjectStub<RepoDurableObject>,
   oid: string
 ): Promise<{ type: string; payload: Uint8Array }> {
-  const obj = await callStubWithRetry<ArrayBuffer | Uint8Array | null>(getStub, (s) =>
-    s.getObject(oid)
-  );
+  const batch = await callStubWithRetry(getStub, (s) => s.getObjectsBatch([oid]));
+  const obj = batch.get(oid);
   if (!obj) throw new Error("missing loose " + oid);
   const z = obj instanceof Uint8Array ? obj : new Uint8Array(obj);
   const raw = await inflate(z);

@@ -127,12 +127,13 @@ describe("pack-first read path storage mode", () => {
     expect(clearedState.compaction?.queued).toBe(false);
   });
 
-  it("reads and updates storage mode for packed repos", async () => {
+  it("reads and updates storage mode for packed repos (legacy ↔ streaming)", async () => {
     const owner = "o";
     const repo = uniqueRepoId("storage-mode-packed");
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
 
+    // Initially legacy (seedPackFirstRepo sets refs and packs, so cold-repo default is legacy)
     const getResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/storage-mode`);
     expect(getResponse.status).toBe(200);
     const getJson = (await getResponse.json()) as {
@@ -146,12 +147,13 @@ describe("pack-first read path storage mode", () => {
     expect(getJson.activePackCount).toBe(1);
     expect(getJson.canChange).toBe(true);
 
+    // Direct transition: legacy → streaming (no shadow-read intermediate)
     const setResponse = await SELF.fetch(
       `https://example.com/${owner}/${repo}/admin/storage-mode`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "shadow-read" }),
+        body: JSON.stringify({ mode: "streaming" }),
       }
     );
     expect(setResponse.status).toBe(200);
@@ -163,45 +165,26 @@ describe("pack-first read path storage mode", () => {
     };
     expect(setJson.status).toBe("ok");
     expect(setJson.changed).toBe(true);
-    expect(setJson.currentMode).toBe("shadow-read");
-    expect(setJson.message).toContain("now shadow-read");
+    expect(setJson.currentMode).toBe("streaming");
+    expect(setJson.message).toContain("now streaming");
 
     expect(await callStubWithRetry(seeded.getStub, (stub) => stub.getRepoStorageMode())).toBe(
-      "shadow-read"
+      "streaming"
     );
-
-    const resetResponse = await SELF.fetch(
-      `https://example.com/${owner}/${repo}/admin/storage-mode`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "legacy" }),
-      }
-    );
-    expect(resetResponse.status).toBe(200);
-    const resetJson = (await resetResponse.json()) as {
-      status?: string;
-      currentMode?: string;
-      message?: string;
-    };
-    expect(resetJson.status).toBe("ok");
-    expect(resetJson.currentMode).toBe("legacy");
-    expect(resetJson.message).toContain("now legacy");
   });
 
-  it("keeps pack-first reads stable while storage mode only toggles validation", async () => {
+  it("pack-first reads work in both legacy and streaming modes", async () => {
     const owner = "o";
-    const repo = uniqueRepoId("storage-mode-validation-only");
+    const repo = uniqueRepoId("storage-mode-reads-stable");
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
 
+    // Read in legacy mode
     const legacyCacheCtx: CacheContext = createTestCacheContext(
       `https://example.com/${owner}/${repo}/raw`
     );
     const legacyRead = await readLooseObjectRaw(env, repoId, seeded.nextCommit.oid, legacyCacheCtx);
     expect(legacyRead?.type).toBe("commit");
-    expect(legacyCacheCtx.memo?.repoStorageMode).toBe("legacy");
-    expect(legacyCacheCtx.memo?.loaderCalls ?? 0).toBe(0);
 
     const legacyRawResponse = await SELF.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${seeded.nextBlob.oid}&name=README.md`
@@ -209,31 +192,42 @@ describe("pack-first read path storage mode", () => {
     expect(legacyRawResponse.status).toBe(200);
     const legacyRawText = await legacyRawResponse.text();
 
-    await callStubWithRetry(seeded.getStub, (stub) => stub.setRepoStorageMode("shadow-read"));
+    // Switch to streaming
+    const switchRes = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/storage-mode`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "streaming" }),
+    });
+    expect(switchRes.status).toBe(200);
 
-    const shadowCacheCtx: CacheContext = createTestCacheContext(
+    // Read in streaming mode — same results
+    const streamingCacheCtx: CacheContext = createTestCacheContext(
       `https://example.com/${owner}/${repo}/raw`
     );
-    const shadowRead = await readLooseObjectRaw(env, repoId, seeded.nextCommit.oid, shadowCacheCtx);
-    expect(shadowRead?.type).toBe(legacyRead?.type);
-    expect(shadowRead?.payload).toEqual(legacyRead?.payload);
-    expect(shadowCacheCtx.memo?.repoStorageMode).toBe("shadow-read");
-    expect(shadowCacheCtx.memo?.loaderCalls ?? 0).toBeGreaterThan(0);
+    const streamingRead = await readLooseObjectRaw(
+      env,
+      repoId,
+      seeded.nextCommit.oid,
+      streamingCacheCtx
+    );
+    expect(streamingRead?.type).toBe(legacyRead?.type);
+    expect(streamingRead?.payload).toEqual(legacyRead?.payload);
 
-    const shadowRawResponse = await SELF.fetch(
+    const streamingRawResponse = await SELF.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${seeded.nextBlob.oid}&name=README.md`
     );
-    expect(shadowRawResponse.status).toBe(200);
-    expect(await shadowRawResponse.text()).toBe(legacyRawText);
+    expect(streamingRawResponse.status).toBe(200);
+    expect(await streamingRawResponse.text()).toBe(legacyRawText);
   });
 
-  it("blocks enabling packed reads validation when no active pack exists", async () => {
+  it("blocks promoting non-empty zero-pack repo to streaming", async () => {
     const owner = "o";
     const repo = uniqueRepoId("storage-mode-no-pack");
     const repoId = `${owner}/${repo}`;
     const getStub = () =>
       env.REPO_DO.get(env.REPO_DO.idFromName(repoId)) as DurableObjectStub<RepoDurableObject>;
 
+    // Seed a repo with refs but no packs (the unsupported loose-only case)
     await runDOWithRetry(getStub, async (instance) => {
       await instance.seedMinimalRepo(false);
     });
@@ -251,16 +245,14 @@ describe("pack-first read path storage mode", () => {
     expect(getJson.currentMode).toBe("legacy");
     expect(getJson.activePackCount).toBe(0);
     expect(getJson.canChange).toBe(false);
-    expect(getJson.blockers).toContain(
-      "At least one active pack is required before enabling packed-read validation."
-    );
+    expect(getJson.blockers?.[0]).toContain("At least one active pack");
 
     const setResponse = await SELF.fetch(
       `https://example.com/${owner}/${repo}/admin/storage-mode`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "shadow-read" }),
+        body: JSON.stringify({ mode: "streaming" }),
       }
     );
     expect(setResponse.status).toBe(409);
@@ -275,9 +267,7 @@ describe("pack-first read path storage mode", () => {
     expect(adminResponse.status).toBe(200);
     const adminHtml = await adminResponse.text();
     expect(adminHtml).toContain("Storage Mode");
-    expect(adminHtml).toContain(
-      "At least one active pack is required before enabling packed-read validation."
-    );
+    expect(adminHtml).toContain("At least one active pack");
   });
 
   it("blocks storage mode changes while a receive lease is active", async () => {
@@ -299,7 +289,7 @@ describe("pack-first read path storage mode", () => {
     const response = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/storage-mode`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "shadow-read" }),
+      body: JSON.stringify({ mode: "streaming" }),
     });
     expect(response.status).toBe(409);
     const payload = (await response.json()) as { status?: string; message?: string };
@@ -326,7 +316,7 @@ describe("pack-first read path storage mode", () => {
     const response = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/storage-mode`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "shadow-read" }),
+      body: JSON.stringify({ mode: "streaming" }),
     });
     expect(response.status).toBe(409);
     const payload = (await response.json()) as { status?: string; message?: string };
@@ -334,25 +324,24 @@ describe("pack-first read path storage mode", () => {
     expect(payload.message).toContain("cannot change");
   });
 
-  it("requires passing through shadow-read before enabling streaming receive", async () => {
+  it("rejects invalid mode names", async () => {
     const owner = "o";
-    const repo = uniqueRepoId("storage-mode-unsupported-target");
+    const repo = uniqueRepoId("storage-mode-invalid");
     const repoId = `${owner}/${repo}`;
     await seedPackFirstRepo(repoId);
 
+    // shadow-read is no longer a valid mode
     const response = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/storage-mode`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "streaming" }),
+      body: JSON.stringify({ mode: "shadow-read" }),
     });
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(400);
     const payload = (await response.json()) as {
       status?: string;
       message?: string;
-      targetMode?: string;
     };
-    expect(payload.status).toBe("unsupported_transition");
-    expect(payload.targetMode).toBe("streaming");
-    expect(payload.message).toContain("Enable shadow-read first");
+    expect(payload.status).toBe("unsupported_target_mode");
+    expect(payload.message).toContain("Only legacy and streaming");
   });
 });

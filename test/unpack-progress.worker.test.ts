@@ -66,6 +66,13 @@ it("unpack-progress advances via alarm and finishes", async () => {
       const repo = uniqueRepoId("r-unpack-progress");
       const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
+      // Put repo in legacy mode so pushes go through the buffered DO receive path
+      {
+        const rid = `${owner}/${repo}`;
+        const stub = () => env.REPO_DO.get(env.REPO_DO.idFromName(rid));
+        await callStubWithRetry(stub as any, (s: any) => s.setRepoStorageMode("legacy"));
+      }
+
       // Build empty tree and a commit
       const treePayload = new Uint8Array(0);
       const author = `You <you@example.com> 0 +0000`;
@@ -135,8 +142,8 @@ it("unpack-progress advances via alarm and finishes", async () => {
       expect(done.unpacking).toBe(false);
 
       // Object should be readable from DO after unpack completes
-      const size = await callStubWithRetry<number | null>(getStub, (s) => s.getObjectSize(treeOid));
-      expect(size).not.toBe(null);
+      const exists = await callStubWithRetry<boolean>(getStub, (s) => s.hasLoose(treeOid));
+      expect(exists).toBe(true);
     }
   );
 });

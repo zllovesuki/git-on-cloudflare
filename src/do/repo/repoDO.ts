@@ -17,17 +17,8 @@ import {
   clearHydrationState,
 } from "./hydration/index.ts";
 import { purgeRepo, removePack } from "./packOperations.ts";
-import {
-  getObjectStream,
-  getObject,
-  hasLoose,
-  hasLooseBatch,
-  getObjectSize,
-  storeObject,
-  getObjectsBatch,
-  getObjectRefsBatch,
-} from "./storage.ts";
-import { getPackLatest, getPacks, getPackOids, getPackOidsBatch } from "./packs.ts";
+import { hasLoose, storeObject, getObjectsBatch } from "./storage.ts";
+import { getPacks } from "./packs.ts";
 import {
   abortCompactionLease,
   abortReceiveLease,
@@ -79,6 +70,7 @@ import {
   touchAndMaybeSchedule,
   type RepoDOAccessContext,
 } from "./repoDO/access.ts";
+import { sanitizeRawStorageMode } from "./catalog/shared.ts";
 import { handleReceiveRequest } from "./repoDO/receive.ts";
 import { handleHydrationAlarmWork } from "./repoDO/hydration.ts";
 import { seedMinimalRepoState } from "./repoDO/seeding.ts";
@@ -87,34 +79,32 @@ import { seedMinimalRepoState } from "./repoDO/seeding.ts";
  * Repository Durable Object (per-repo authority)
  *
  * Responsibilities
- * - Acts as the strongly consistent source of truth for repository metadata
- * - Stores refs, HEAD, rollout mode, and pack catalog state in DO storage/SQLite
- * - Keeps loose-object state only for compatibility and rollback helpers during rollout
+ * - Acts as the strongly consistent source of truth for repository metadata.
+ * - Stores refs, HEAD, storage mode, and pack catalog state in DO storage/SQLite.
  * - Exposes focused internal HTTP endpoints:
- *   - `POST /receive` — current receive-pack implementation (delegates to git/operations/receive.ts)
+ *   - `POST /receive` — legacy receive-pack (delegates to git/operations/receive.ts)
  * - All other operations are provided as typed RPC methods on the class.
  *
  * Read Path (RPC)
- * - Correctness reads now live in worker-local pack-first helpers under `src/git/object-store/`.
- * - Legacy object RPCs remain available as compatibility, rollback, and admin/debug helpers.
- * - There is no public HTTP endpoint for object reads; this keeps internal state access typed and
- *   easy to audit.
+ * - Correctness reads live in worker-local pack-first helpers under `src/git/object-store/`.
+ * - There is no public HTTP endpoint for object reads; this keeps internal state access typed
+ *   and easy to audit.
  *
  * Write Path
- * - Loose object writes: DO storage first, then mirror to R2 via `r2LooseKey()`.
- * - Streaming receive writes staged `.pack` and `.idx` data from the Worker, then commits refs and
- *   pack-catalog metadata through typed DO RPCs.
- * - The legacy `POST /receive` path still buffers the request body, stores the raw `.pack` to R2,
- *   performs a fast index-only step to produce `.idx`, and then queues asynchronous unpack work.
- *   That compatibility path remains in place for `legacy` and `shadow-read` repos.
+ * - Streaming receive (default): the Worker writes staged `.pack` and `.idx` data to R2, then
+ *   commits refs and pack-catalog metadata through typed DO RPCs.
+ * - Legacy receive (rollback window): the `POST /receive` path buffers the request body,
+ *   stores the raw `.pack` to R2, performs a fast index-only step to produce `.idx`, and
+ *   queues asynchronous unpack work. This path remains callable for repos explicitly set
+ *   to `legacy` mode.
  *
  * Maintenance & Background Work
  * - `alarm()` is mode-aware:
- *   1) `streaming` repos use it only for lightweight lease cleanup, compaction queue re-arm,
- *      and idle cleanup.
- *   2) `legacy` and `shadow-read` repos continue to use it for legacy unpack and hydration work,
- *      plus idle cleanup and periodic maintenance.
- * - Listing/sweeping uses helpers from `keys.ts` to avoid path mismatches.
+ *   1) `streaming` repos: lightweight lease cleanup, compaction queue re-arm, idle cleanup.
+ *   2) `legacy` repos: legacy unpack and hydration work, plus idle cleanup and periodic
+ *      maintenance. Hydration packs (`pack-hydr-*`) and hydration coverage help make the
+ *      serving set complete for legacy fetch.
+ * - The DO is the metadata authority; the data plane lives in R2 packs.
  */
 export class RepoDurableObject extends DurableObject {
   declare env: Env;
@@ -128,6 +118,7 @@ export class RepoDurableObject extends DurableObject {
       this.db = getDb(ctx.storage);
       await migrate(this.db, migrations);
       await migrateKvToSql(this.ctx, this.db, this.logger);
+      await sanitizeRawStorageMode(ctx.storage, this.logger);
       await this.ensureAccessAndAlarm();
     });
   }
@@ -218,44 +209,14 @@ export class RepoDurableObject extends DurableObject {
     return await getHeadAndRefs(this.ctx);
   }
 
-  public async getObjectStream(oid: string): Promise<ReadableStream | null> {
-    await this.ensureAccessAndAlarm();
-    return await getObjectStream(this.ctx, this.env, this.prefix(), oid);
-  }
-
-  public async getObject(oid: string): Promise<ArrayBuffer | Uint8Array | null> {
-    await this.ensureAccessAndAlarm();
-    return await getObject(this.ctx, this.env, this.prefix(), oid);
-  }
-
   public async hasLoose(oid: string): Promise<boolean> {
     await this.ensureAccessAndAlarm();
     return await hasLoose(this.ctx, this.env, this.prefix(), oid);
   }
 
-  public async hasLooseBatch(oids: string[]): Promise<boolean[]> {
-    await this.ensureAccessAndAlarm();
-    return await hasLooseBatch(this.ctx, this.env, this.prefix(), oids, this.logger);
-  }
-
-  public async getPackLatest(): Promise<{ key: string; oids: string[] } | null> {
-    await this.ensureAccessAndAlarm();
-    return await getPackLatest(this.ctx);
-  }
-
   public async getPacks(): Promise<string[]> {
     await this.ensureAccessAndAlarm();
     return await getPacks(this.ctx, this.env);
-  }
-
-  public async getPackOids(key: string): Promise<string[]> {
-    await this.ensureAccessAndAlarm();
-    return await getPackOids(this.ctx, key);
-  }
-
-  public async getPackOidsBatch(keys: string[]): Promise<Map<string, string[]>> {
-    await this.ensureAccessAndAlarm();
-    return await getPackOidsBatch(this.ctx, keys, this.logger);
   }
 
   public async getActivePackCatalog(): Promise<PackCatalogRow[]> {
@@ -479,11 +440,6 @@ export class RepoDurableObject extends DurableObject {
     return await getObjectsBatch(this.ctx, oids);
   }
 
-  public async getObjectRefsBatch(oids: string[]): Promise<Map<string, string[]>> {
-    await this.ensureAccessAndAlarm();
-    return await getObjectRefsBatch(this.ctx, oids, this.logger);
-  }
-
   private async handleReceive(request: Request) {
     return await handleReceiveRequest({
       ctx: this.ctx,
@@ -557,11 +513,6 @@ export class RepoDurableObject extends DurableObject {
     await this.ensureAccessAndAlarm();
     if (!isValidOid(oid)) throw new Error("Bad oid");
     await storeObject(this.ctx, this.env, this.prefix(), oid, zdata);
-  }
-
-  public async getObjectSize(oid: string): Promise<number | null> {
-    await this.ensureAccessAndAlarm();
-    return await getObjectSize(this.ctx, this.env, this.prefix(), oid);
   }
 
   public async purgeRepo(): Promise<{ deletedR2: number; deletedDO: boolean }> {

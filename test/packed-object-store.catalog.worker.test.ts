@@ -30,9 +30,9 @@ describe("packed object store catalog", () => {
     expect(catalog[0]?.idxBytes).toBeGreaterThan(0);
 
     expect(await callStubWithRetry(seededStub, (stub) => stub.getRepoStorageMode())).toBe("legacy");
-    await callStubWithRetry(seededStub, (stub) => stub.setRepoStorageMode("shadow-read"));
+    await callStubWithRetry(seededStub, (stub) => stub.setRepoStorageMode("streaming"));
     expect(await callStubWithRetry(seededStub, (stub) => stub.getRepoStorageMode())).toBe(
-      "shadow-read"
+      "streaming"
     );
   });
 

@@ -128,7 +128,7 @@ describe("pack-first read path closure", () => {
       head: { target: "refs/heads/main", oid: commit.oid },
       looseObjects: [commit],
     });
-    await callStubWithRetry(getStub, (stub) => stub.setRepoStorageMode("shadow-read"));
+    await callStubWithRetry(getStub, (stub) => stub.setRepoStorageMode("streaming"));
 
     const cacheCtx = createTestCacheContext(`https://example.com/${repoId}/git-upload-pack`);
     const needed = await computeNeededFast(env, repoId, [commit.oid], [], cacheCtx);

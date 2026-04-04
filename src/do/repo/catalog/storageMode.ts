@@ -12,25 +12,33 @@ import { activeLeaseOrUndefined } from "./activity.ts";
 import { getRollbackCompatControlFromStore } from "./legacyCompat.ts";
 import { ensureRepoMetadataDefaults } from "./shared.ts";
 
-const ALL_REPO_STORAGE_MODES: RepoStorageMode[] = ["legacy", "shadow-read", "streaming"];
-
 function isRepoStorageMode(mode: string): mode is RepoStorageMode {
-  return mode === "legacy" || mode === "shadow-read" || mode === "streaming";
+  return mode === "legacy" || mode === "streaming";
 }
 
 function buildModeMessage(mode: RepoStorageMode): string {
   if (mode === "legacy") {
-    return "Pack-first reads remain authoritative and compatibility validation is disabled.";
-  }
-  if (mode === "shadow-read") {
-    return "Pack-first reads remain authoritative and are validated against compatibility reads.";
+    return "Pack-first reads are authoritative. Legacy receive/unpack/hydration paths are active.";
   }
   return "Pushes stream directly into R2 packs. Leaving this mode requires prepared rollback compatibility data.";
 }
 
+/**
+ * Build the list of human-readable blockers preventing a mode change.
+ *
+ * Transition rules:
+ * - legacy → streaming: requires activePackCount > 0, OR the repo is truly empty
+ *   (no refs AND no packs AND packsetVersion === 0).
+ * - streaming → legacy: requires rollback backfill ready, OR the repo is truly empty.
+ *
+ * The empty-repo gate requires no refs AND zero packs to avoid the unsupported
+ * loose-only-with-refs case.
+ */
 function buildRepoStorageModeBlockers(args: {
   currentMode: RepoStorageMode;
   activePackCount: number;
+  refsCount: number;
+  packsetVersion: number;
   receiveLease?: { createdAt: number; expiresAt: number; token: string };
   compactLease?: { createdAt: number; expiresAt: number; token: string };
   rollbackCompat: RepoStorageModeControl["rollbackCompat"];
@@ -43,13 +51,15 @@ function buildRepoStorageModeBlockers(args: {
     blockers.push("Pack compaction is currently updating repository metadata.");
   }
 
-  if (args.currentMode === "legacy" && args.activePackCount === 0) {
-    blockers.push("At least one active pack is required before enabling packed-read validation.");
+  const isTrulyEmpty =
+    args.refsCount === 0 && args.activePackCount === 0 && args.packsetVersion === 0;
+
+  if (args.currentMode === "legacy" && args.activePackCount === 0 && !isTrulyEmpty) {
+    blockers.push(
+      "At least one active pack is required before enabling streaming receive (non-empty repo with no packs cannot be promoted)."
+    );
   }
-  if (args.currentMode === "shadow-read" && args.activePackCount === 0) {
-    blockers.push("At least one active pack is required before enabling streaming receive.");
-  }
-  if (args.currentMode === "streaming" && args.rollbackCompat.status !== "ready") {
+  if (args.currentMode === "streaming" && args.rollbackCompat.status !== "ready" && !isTrulyEmpty) {
     blockers.push(
       args.rollbackCompat.message ||
         "Rollback compatibility data must be prepared before leaving streaming mode."
@@ -63,6 +73,8 @@ function canTransition(args: {
   currentMode: RepoStorageMode;
   targetMode: RepoStorageMode;
   activePackCount: number;
+  refsCount: number;
+  packsetVersion: number;
   receiveActive: boolean;
   compactionActive: boolean;
   rollbackCompat: RepoStorageModeControl["rollbackCompat"];
@@ -70,25 +82,25 @@ function canTransition(args: {
   if (args.currentMode === args.targetMode) return true;
   if (args.receiveActive || args.compactionActive) return false;
 
+  const isTrulyEmpty =
+    args.refsCount === 0 && args.activePackCount === 0 && args.packsetVersion === 0;
+
   if (args.currentMode === "legacy") {
-    if (args.targetMode === "shadow-read") return args.activePackCount > 0;
-    return false;
-  }
-  if (args.currentMode === "shadow-read") {
-    if (args.targetMode === "legacy") return true;
-    if (args.targetMode === "streaming") return args.activePackCount > 0;
-    return false;
+    // legacy → streaming: requires active packs OR truly empty
+    return args.activePackCount > 0 || isTrulyEmpty;
   }
 
-  return (
-    (args.targetMode === "legacy" || args.targetMode === "shadow-read") &&
-    args.rollbackCompat.status === "ready"
-  );
+  // streaming → legacy: requires rollback backfill ready OR truly empty
+  return args.rollbackCompat.status === "ready" || isTrulyEmpty;
 }
+
+const ALLOWED_MODES: RepoStorageMode[] = ["legacy", "streaming"];
 
 function buildRepoStorageModeControlSnapshot(args: {
   currentMode: RepoStorageMode;
   activePackCount: number;
+  refsCount: number;
+  packsetVersion: number;
   receiveLease?: { createdAt: number; expiresAt: number; token: string };
   compactLease?: { createdAt: number; expiresAt: number; token: string };
   rollbackCompat: RepoStorageModeControl["rollbackCompat"];
@@ -97,12 +109,14 @@ function buildRepoStorageModeControlSnapshot(args: {
   const compactionActive = !!args.compactLease;
   const blockers = buildRepoStorageModeBlockers(args);
 
-  const canChange = ALL_REPO_STORAGE_MODES.some((targetMode) =>
+  const canChange = ALLOWED_MODES.some((targetMode) =>
     targetMode !== args.currentMode
       ? canTransition({
           currentMode: args.currentMode,
           targetMode,
           activePackCount: args.activePackCount,
+          refsCount: args.refsCount,
+          packsetVersion: args.packsetVersion,
           receiveActive,
           compactionActive,
           rollbackCompat: args.rollbackCompat,
@@ -114,7 +128,7 @@ function buildRepoStorageModeControlSnapshot(args: {
     status: "ok",
     currentMode: args.currentMode,
     canChange,
-    allowedModes: ALL_REPO_STORAGE_MODES,
+    allowedModes: ALLOWED_MODES,
     activePackCount: args.activePackCount,
     receiveActive,
     compactionActive,
@@ -132,7 +146,11 @@ export async function getRepoStorageModeControl(
 ): Promise<RepoStorageModeControl> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const currentMode = await ensureRepoMetadataDefaults(store);
-  const activeCatalog = await getActivePackCatalogSnapshot(ctx, env, prefix, logger);
+  const [activeCatalog, refs, packsetVersion] = await Promise.all([
+    getActivePackCatalogSnapshot(ctx, env, prefix, logger),
+    store.get("refs"),
+    store.get("packsetVersion"),
+  ]);
   const now = Date.now();
   const receiveLease = activeLeaseOrUndefined(await store.get("receiveLease"), now);
   const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), now);
@@ -141,6 +159,8 @@ export async function getRepoStorageModeControl(
   return buildRepoStorageModeControlSnapshot({
     currentMode,
     activePackCount: activeCatalog.length,
+    refsCount: Array.isArray(refs) ? refs.length : 0,
+    packsetVersion: packsetVersion ?? 0,
     receiveLease,
     compactLease,
     rollbackCompat,
@@ -156,14 +176,23 @@ export async function setRepoStorageModeGuarded(
 ): Promise<RepoStorageModeMutationResult> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const previousMode = await ensureRepoMetadataDefaults(store);
-  const activeCatalog = await getActivePackCatalogSnapshot(ctx, env, prefix, logger);
+  const [activeCatalog, refs, packsetVersion] = await Promise.all([
+    getActivePackCatalogSnapshot(ctx, env, prefix, logger),
+    store.get("refs"),
+    store.get("packsetVersion"),
+  ]);
   const now = Date.now();
   const receiveLease = activeLeaseOrUndefined(await store.get("receiveLease"), now);
   const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), now);
   const rollbackCompat = await getRollbackCompatControlFromStore(store);
+  const refsCount = Array.isArray(refs) ? refs.length : 0;
+  const pv = packsetVersion ?? 0;
+
   const control = buildRepoStorageModeControlSnapshot({
     currentMode: previousMode,
     activePackCount: activeCatalog.length,
+    refsCount,
+    packsetVersion: pv,
     receiveLease,
     compactLease,
     rollbackCompat,
@@ -174,7 +203,7 @@ export async function setRepoStorageModeGuarded(
       status: "unsupported_target_mode",
       currentMode: previousMode,
       targetMode: mode,
-      message: "Only legacy, shadow-read, and streaming are valid storage modes.",
+      message: "Only legacy and streaming are valid storage modes.",
       control,
     };
   }
@@ -200,40 +229,29 @@ export async function setRepoStorageModeGuarded(
     };
   }
 
-  if (previousMode === "legacy" && mode === "shadow-read" && activeCatalog.length === 0) {
+  const isTrulyEmpty = refsCount === 0 && activeCatalog.length === 0 && pv === 0;
+
+  if (
+    previousMode === "legacy" &&
+    mode === "streaming" &&
+    activeCatalog.length === 0 &&
+    !isTrulyEmpty
+  ) {
     return {
       status: "no_active_packs",
       currentMode: previousMode,
       targetMode: mode,
-      message: "At least one active pack is required before enabling packed-read validation.",
-      control,
-    };
-  }
-
-  if (previousMode === "legacy" && mode === "streaming") {
-    return {
-      status: "unsupported_transition",
-      currentMode: previousMode,
-      targetMode: mode,
-      message: "Enable shadow-read first before switching this repository to streaming receive.",
-      control,
-    };
-  }
-
-  if (previousMode === "shadow-read" && mode === "streaming" && activeCatalog.length === 0) {
-    return {
-      status: "no_active_packs",
-      currentMode: previousMode,
-      targetMode: mode,
-      message: "At least one active pack is required before enabling streaming receive.",
+      message:
+        "At least one active pack is required before enabling streaming receive (non-empty repo with no packs cannot be promoted).",
       control,
     };
   }
 
   if (
     previousMode === "streaming" &&
-    (mode === "legacy" || mode === "shadow-read") &&
-    rollbackCompat.status !== "ready"
+    mode === "legacy" &&
+    rollbackCompat.status !== "ready" &&
+    !isTrulyEmpty
   ) {
     return {
       status: "rollback_backfill_required",
@@ -252,6 +270,8 @@ export async function setRepoStorageModeGuarded(
   const nextControl = buildRepoStorageModeControlSnapshot({
     currentMode: mode,
     activePackCount: activeCatalog.length,
+    refsCount,
+    packsetVersion: pv,
     receiveLease: undefined,
     compactLease: undefined,
     rollbackCompat,

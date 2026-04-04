@@ -2,7 +2,9 @@
 
 ## Status
 
-This document specifies the replacement for the current unpack-and-hydrate repository pipeline.
+**Phase 5 cutover completed.** Streaming is now the default for new repos. Shadow-read has been retired from the type system. Legacy receive/alarm branches remain callable for repos explicitly set to `legacy` mode (rollback window). See `MIGRATION-STREAMING-PUSH.md` for operator guidance.
+
+This document specifies the streaming push design that replaced the unpack-and-hydrate pipeline.
 
 The new design makes R2 `.pack` and `.idx` objects the only required source of truth for Git object data. The repository Durable Object remains the source of truth for metadata only: refs, HEAD, pack catalog state, receive/compaction leases, and rollout state.
 
@@ -187,25 +189,29 @@ Notes:
 - `compactionWantedAt`
 - `repoStorageMode`
 
-`repoStorageMode` is temporary rollout metadata:
+`repoStorageMode` controls the repo's receive and alarm behavior.
+
+> **Post-cutover:** `repoStorageMode` is `"legacy" | "streaming"`. Direct `legacy -> streaming` is allowed when the repo has active packs or is truly empty. `streaming -> legacy` requires rollback backfill or a truly empty repo. The three-mode rules below are preserved as historical rollout context.
+
+Historical rollout values (prior to Phase 5 cutover):
 
 - `legacy`
-- `shadow-read`
+- `shadow-read` (retired — auto-normalized to `streaming` on DO access)
 - `streaming`
 
-This is repo-local, not an env var. It keeps rollout state explicit while the read and receive cutovers are still in progress.
+This is repo-local, not an env var.
 
-Admin control surface rules:
+Historical admin control surface rules (prior to Phase 5 cutover):
 
-- the admin UI and admin endpoint expose `legacy`, `shadow-read`, and `streaming` once worker-local streaming receive is implemented;
-- both `legacy` and `shadow-read` keep fetch/UI reads on the same pack-first Worker path;
-- `legacy` disables packed-vs-compatibility validation;
-- `shadow-read` enables packed-vs-compatibility validation;
-- `legacy -> shadow-read` requires at least one active pack in `pack_catalog`;
-- `legacy -> streaming` is rejected; canary rollout moves one step at a time through `shadow-read`;
-- `shadow-read -> streaming` requires at least one active pack in `pack_catalog`;
-- `streaming -> legacy|shadow-read` requires rollback compatibility data prepared for the current `packsetVersion`;
-- `shadow-read -> legacy` is the fast way to disable validation if canary noise appears;
+- the admin UI and admin endpoint exposed `legacy`, `shadow-read`, and `streaming`;
+- both `legacy` and `shadow-read` kept fetch/UI reads on the same pack-first Worker path;
+- `legacy` disabled packed-vs-compatibility validation;
+- `shadow-read` enabled packed-vs-compatibility validation;
+- `legacy -> shadow-read` required at least one active pack in `pack_catalog`;
+- `legacy -> streaming` was rejected; canary rollout moved one step at a time through `shadow-read`;
+- `shadow-read -> streaming` required at least one active pack in `pack_catalog`;
+- `streaming -> legacy|shadow-read` required rollback compatibility data prepared for the current `packsetVersion`;
+- `shadow-read -> legacy` was the fast way to disable validation if canary noise appeared;
 - mode changes are blocked while a receive lease or compaction lease is active.
 
 Lease contents:
@@ -269,7 +275,7 @@ The Worker handles receive-pack end to end. The DO is used only for:
 - committing ref changes and the new pack row;
 - clearing the lease.
 
-The DO no longer exposes `POST /receive`.
+The DO exposes `POST /receive` only for repos in `legacy` mode during the rollback window. Streaming repos use typed RPCs instead.
 
 ### Client-visible behavior
 
@@ -809,16 +815,18 @@ Add a small storage-mode control endpoint:
 - `PUT /:owner/:repo/admin/storage-mode`
 - `POST /:owner/:repo/admin/storage-mode/backfill`
 
-`PUT` accepts:
+> **Post-cutover:** `PUT` accepts only `legacy` and `streaming`. The `shadow-read` mode and its transition rules below are historical.
+
+`PUT` historically accepted:
 
 - `legacy`
-- `shadow-read`
+- `shadow-read` (retired)
 - `streaming`
 
 Mode meaning during the streaming-receive rollout:
 
 - `legacy`: packed reads remain authoritative and validation is disabled
-- `shadow-read`: the same packed reads remain authoritative and are validated against compatibility reads
+- `shadow-read`: the same packed reads remain authoritative and are validated against compatibility reads (retired)
 - `streaming`: packed reads remain authoritative and pushes stream directly into staged R2 packs before DO metadata commit
 
 `POST /admin/storage-mode/backfill`:
@@ -832,9 +840,8 @@ It must reject:
 
 - mode changes while a receive lease is active
 - mode changes while a compaction lease is active
-- `legacy -> shadow-read` when the repo still has zero active packs
-- `legacy -> streaming`
-- `streaming -> legacy|shadow-read` when rollback compatibility data is missing or stale for the current `packsetVersion`
+- `legacy -> streaming` when the repo has no active packs and is not truly empty (the unsupported loose-only case)
+- `streaming -> legacy` when rollback compatibility data is missing or stale for the current `packsetVersion` and the repo is not truly empty
 
 Do not remove the `/hydrate` routes until the admin UI has been migrated and the rollback window has closed.
 
@@ -970,6 +977,8 @@ Primary files to update:
 ## Phased Implementation Plan
 
 Each phase below is a releasable slice.
+
+> **Archival:** Phases 1-4 are complete. `shadow-read` canaries are retired. This section is preserved as historical rollout context. See `MIGRATION-STREAMING-PUSH.md` for the current operator guide.
 
 ### Phase 1: Pack Catalog and Worker Object Store Shadow Mode
 
@@ -1197,3 +1206,21 @@ The rollout is successful only if all of the following are true:
 4. Do not make loose objects required again, even as a “temporary shortcut”.
 5. Do not store repo metadata in R2.
 6. Prefer simple fixed constants over new env vars unless a hard operational need appears during implementation.
+
+---
+
+## Closure Release Implementation Checklist
+
+After the rollback window closes, a future session removes all remaining compatibility-only surfaces. This checklist is the agent-facing task list for that work:
+
+1. Remove emergency backfill tool: `src/maintenance/legacyCompatBackfill.ts`, `src/do/repo/catalog/legacyCompat.ts`, backfill RPCs, `POST /admin/storage-mode/backfill`, `LegacyCompatBackfillState`, `test/streaming-receive.rollback.worker.test.ts`
+2. Remove `/admin/hydrate` aliases and `startHydration`/`clearHydration` RPCs
+3. Remove `mirrorLegacyPackKeys()` and `lastPackKey`/`lastPackOids`/`packList` from `RepoStateSchema`
+4. Remove `REPO_UNPACK_*` from `wrangler.jsonc`, `repoConfig.ts`, `vitest.bindings.ts`; run `npm run cf-typegen`
+5. Delete `src/do/repo/unpack.ts`, `src/do/repo/repoDO/receive.ts`, `src/do/repo/repoDO/hydration.ts`, `src/do/repo/hydration/`, `src/git/operations/receive.ts`, `src/git/pack/loose-loader.ts`, `src/git/pack/unpack.ts` (rewrite `seeding.ts` first)
+6. Remove `unpackWork`, `unpackNext`, `hydrationWork`, `hydrationQueue` and types from `RepoStateSchema`
+7. Drop `pack_objects`, `hydr_cover`, `hydr_pending` tables via `npm run db:gen`
+8. Remove `isomorphic-git` from `package.json` and `vitest.config.ts`
+9. Remove `RepoStorageMode` type and all storage-mode RPCs/admin endpoints
+10. Delete remaining legacy tests: `receive-push`, `receive-queue`, `fetch-during-unpack`, `create-mem-pack-fs`, `calculate-stable-epochs`, `migrate-packkeys`, `unpack-progress`, `hydration-coverage-epochs`, `hydration-clear-deletes-packobjects`, `maintenance` hydration assertions
+11. Final docs cleanup: mark closure complete, remove all legacy references

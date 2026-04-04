@@ -153,7 +153,7 @@ export async function seedPackedRepo(
     env: args.env,
     repoId: args.repoId,
     getStub: args.getStub,
-    packs: [{ name: "pack-shadow-read.pack", packBytes }],
+    packs: [{ name: "pack-initial.pack", packBytes }],
     refs: [
       { name: "refs/heads/main", oid: commit.oid },
       { name: "refs/tags/v1", oid: tag.oid },
@@ -228,4 +228,34 @@ export async function deleteLooseObjectCopies(
       await args.env.REPO_BUCKET.delete(r2LooseKey(prefix, oid));
     }
   });
+}
+
+/**
+ * Build a pack from raw payloads, upload to R2, and register in the DO catalog.
+ * Use this to make loose-only test objects readable via the pack-first read path.
+ */
+export async function registerTestPack(args: {
+  env: Env;
+  repoId: string;
+  getStub: () => DurableObjectStub<RepoDurableObject>;
+  packName: string;
+  objects: Array<{ type: "commit" | "tree" | "blob" | "tag"; payload: Uint8Array }>;
+}): Promise<string> {
+  const packBytes = await buildPack(args.objects);
+
+  let packKey = "";
+  await runDOWithRetry(args.getStub, async (_instance, state) => {
+    const prefix = doPrefix(state.id.toString());
+    packKey = r2PackKey(prefix, args.packName);
+    await args.env.REPO_BUCKET.put(packKey, packBytes);
+    const oids = await indexPackOnly(packBytes, args.env, packKey, state, prefix);
+    const store = asTypedStorage<RepoStateSchema>(state.storage);
+    const existing = ((await store.get("packList")) || []) as string[];
+    existing.unshift(packKey);
+    await store.put("packList", existing);
+    await store.put("lastPackKey", packKey);
+    await store.put("lastPackOids", oids);
+  });
+
+  return packKey;
 }

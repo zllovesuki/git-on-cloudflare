@@ -1,5 +1,5 @@
-import { RepoStorageMode } from "@/do/repo/repoState";
-export { RepoStorageMode };
+import type { RepoStorageMode } from "@/do/repo/repoState";
+export type { RepoStorageMode };
 
 export type RollbackCompatStatus =
   | "not_requested"

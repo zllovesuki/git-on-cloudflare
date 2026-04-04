@@ -4,35 +4,45 @@ This document describes the primary data flows of the server: pushing (receive-p
 
 ## Push (git-receive-pack)
 
-1. Client sends `POST /:owner/:repo/git-receive-pack` (Smart HTTP v0 style body)
-2. Worker preflights the DO via RPC: `getUnpackProgress()`. If an unpack is active and a next pack is already queued, the Worker returns `503 Service Unavailable` with `Retry-After: 10` without uploading the pack body.
-3. Otherwise, Worker forwards the raw body to the repository DO internal endpoint: `POST https://do/receive`
-4. DO `receivePack()`:
+### Streaming mode (default)
+
+1. Client sends `POST /:owner/:repo/git-receive-pack`
+2. Worker reads storage mode from the DO. For `streaming` repos:
+   - Worker acquires a receive lease via `beginReceive()` RPC
+   - Parses pkt-line commands and the packfile payload
+   - Writes the `.pack` to R2, builds `.idx` inline, and writes it to R2
+   - Commits refs and pack-catalog metadata atomically via `finalizeReceive()` RPC
+   - Returns a pkt-line `report-status` response with sideband progress
+
+### Legacy mode (rollback window)
+
+1. Worker preflights the DO via RPC: `getUnpackProgress()`. If an unpack is active and a next pack is already queued, the Worker returns `503 Service Unavailable` with `Retry-After: 10`.
+2. Otherwise, Worker forwards the raw body to the repository DO internal endpoint: `POST https://do/receive`
+3. DO `receivePack()`:
    - Parses pkt-line commands and the packfile payload
    - Writes the `.pack` to R2 under `do/<id>/objects/pack/pack-<ts>.pack`
    - Performs a fast index-only step to produce `.idx` in R2
-   - Queues unpack work; the DO `alarm()` processes objects in small time-budgeted chunks and mirrors loose objects to R2 as it goes
-   - Validates and atomically updates refs if all commands are valid
+   - Queues unpack work; the DO `alarm()` processes objects in small time-budgeted chunks
+   - Validates and atomically updates refs
    - Returns a pkt-line `report-status` response
 
-Concurrency: relies on Durable Object single-threaded execution, plus a one-deep receive-pack queue on the DO (`unpackWork` + `unpackNext`). A third concurrent push is rejected with HTTP 503 (also guarded within the DO pre-body) to avoid unbounded queuing.
+Concurrency (legacy): relies on Durable Object single-threaded execution, plus a one-deep receive-pack queue on the DO (`unpackWork` + `unpackNext`). A third concurrent push is rejected with HTTP 503.
 
-The DO maintains metadata to help fetch:
+### Metadata maintained by the DO
 
-- DO state: `lastPackKey` and `packList` (recent packs)
+- DO state: `lastPackKey` and `packList` (recent packs, legacy compatibility)
 - SQLite tables (embedded in the DO):
-  - `pack_objects(pack_key, oid)` — exact pack membership, indexed by `oid`
-  - `hydr_cover(work_id, oid)` — coverage set for hydration segments
-  - `hydr_pending(work_id, kind, oid)` — pending OIDs to build hydration segments; `kind` ∈ {`base`, `loose`}
-
-Pack membership is persisted immediately during hydration/segment builds and referenced during fetch to compute union coverage efficiently. Hydration is resumable across alarms; pending sets and coverage live in SQLite to survive restarts.
+  - `pack_catalog(pack_key, ...)` — authoritative pack metadata for read-path discovery and compaction
+  - `pack_objects(pack_key, oid)` — legacy pack membership mirror; `.idx` files in R2 are authoritative for reads
+  - `hydr_cover(work_id, oid)` — coverage set for legacy hydration segments
+  - `hydr_pending(work_id, kind, oid)` — pending OIDs for legacy hydration; `kind` ∈ {`base`, `loose`}
 
 ## Fetch (git-upload-pack v2)
 
 1. Client sends capability advertisement request: `GET /:owner/:repo/info/refs?service=git-upload-pack`
 2. For `POST /:owner/:repo/git-upload-pack` with a v2 body:
    - `ls-refs` command: reads the DO via RPC (`getHead()` and `listRefs()`) and responds with HEAD + refs
-   - `fetch` command (now using streaming by default):
+   - `fetch` command (streaming by default):
      - Negotiation phase (`done=false`): server returns an acknowledgments block only (ACK/NAK), no `packfile` section
      - Parses wants/haves and computes minimal closure using frontier-subtract approach with stop sets
      - Discovers candidate packs via `src/git/operations/packDiscovery.ts#getPackCandidates()` (DO metadata first, then best‑effort R2 listing), memoized per request with limiter + soft budget
@@ -41,20 +51,18 @@ Pack membership is persisted immediately during hydration/segment builds and ref
        - Multi-pack union: `streamPackFromMultiplePacks()` with proper delta resolution
        - Uses `crypto.DigestStream` for incremental SHA-1 computation
        - Emits sideband-64k with progress messages on channel 2
-     - If repository has no packs (loose-only), returns `503` with `Retry-After: 5` and message about objects being packed
+     - If repository has no packs, returns `503` with `Retry-After: 5`
      - If closure traversal times out, tries a safe multi-pack union based on recent packs
-     - Legacy buffered mode still available with `X-Git-Streaming: false` header (deprecated)
 
 ## Web UI blob views
 
 - `GET /:owner/:repo/blob?ref=...&path=...` (preview)
-  - Resolves path to an OID via DO RPC reads
-  - Uses a DO RPC (`getObjectSize()`) which performs an R2 `HEAD` to get size without transferring data
+  - Resolves path to an OID via pack-first reads through the worker-local object store
   - If the file is "too large" (configurable threshold), shows a friendly message and links to raw
   - If not too large, fetches the object and renders text (with simple binary detection)
 
 - `GET /:owner/:repo/raw?oid=...&name=...` (raw)
-  - Streams the object via DO RPC (`getObjectStream()`), piping through a decompression stream and stripping the Git header on the fly
+  - Reads the object via pack-first store, decompresses, and streams
   - Uses `Content-Disposition: inline` by default (add `&download=1` to force attachment)
   - Uses `text/plain; charset=utf-8` for safety (prevents HTML/JS execution)
 

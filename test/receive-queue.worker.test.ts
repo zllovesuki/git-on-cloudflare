@@ -39,6 +39,11 @@ it("receive-pack: one-deep queue, third push blocked with 503", async () => {
   const repo = uniqueRepoId("r-queue-503");
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
+  // Put the repo in legacy mode so pushes go through the buffered DO receive path
+  const repoIdForMode = `${owner}/${repo}`;
+  const getStubForMode = () => env.REPO_DO.get(env.REPO_DO.idFromName(repoIdForMode));
+  await callStubWithRetry(getStubForMode as any, (s: any) => s.setRepoStorageMode("legacy"));
+
   // Build objects for three independent pushes
   const { oid: treeOid, payload: treePayload } = await makeTree();
 

@@ -87,7 +87,6 @@ The CacheContext interface combines Request and ExecutionContext for operations 
 - `packList?: string[]` and `packListPromise?: Promise<string[]>` — centralized pack discovery results and in-flight coalescing
 - `packOids?: Map<packKey, Set<oid>>` — in-memory membership hints reused within the request
 - `doBatchBudget?: number`, `doBatchDisabled?: boolean` — shared budget for DO batch refs calls across closure phases
-- `loaderCap?: number`, `loaderCalls?: number` — soft cap and count for DO-backed loose loads to avoid overuse
 - `subreqBudget?: number` — soft subrequest budget for upstream calls
 - `flags?: Set<string>` — per-request guardrails and log throttles (e.g., `no-cache-read`, `closure-timeout`)
 - `limiter?: { run(label, fn) }` — per-request concurrency limiter for DO/R2 calls
@@ -96,7 +95,7 @@ The CacheContext interface combines Request and ExecutionContext for operations 
 
 Reads avoid KV entirely. Instead, pack discovery is centralized and memoized per request via `src/git/operations/packDiscovery.ts#getPackCandidates()`:
 
-- Always seeds from the repo Durable Object using `getPackLatest()` and `getPacks()` (newest-first).
+- Seeds from the repo Durable Object pack catalog and pack list metadata (newest-first).
 - Falls back to a best-effort R2 listing under the DO pack prefix when DO metadata is unavailable.
 - Coalesces concurrent discovery calls within the same request using a per-request promise in `RequestMemo`.
 - Applies a per-request concurrency limiter and soft subrequest budget to keep DO/R2 calls bounded.

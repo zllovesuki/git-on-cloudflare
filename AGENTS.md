@@ -90,7 +90,7 @@ Write changes against the current source tree, not the docs alone. Some document
 - `src/routes/git.ts`: Git Smart HTTP endpoints, upload-pack/receive-pack behavior
 - `src/routes/admin.ts`: owner-authenticated admin JSON endpoints
 - `src/routes/auth.ts`: auth UI and auth API endpoints
-- `src/do/repo/repoDO.ts`: repository Durable Object authority and background work entrypoints
+- `src/do/repo/repoDO.ts`: repository Durable Object — metadata authority, streaming receive leases, compaction, and background work
 - `src/do/repo/db/dal.ts`: the required access layer for SQLite-backed repo metadata
 - `src/client/server/render.tsx` and `src/client/server/registry.tsx`: SSR view registration and rendering
 - `wrangler.jsonc`: bindings, vars, assets handling, compatibility date
@@ -98,7 +98,7 @@ Write changes against the current source tree, not the docs alone. Some document
 ## Directory Map
 
 - `src/routes/`: HTTP route registration and route handlers
-- `src/do/repo/`: repository Durable Object, unpacking, hydration, maintenance, storage, DB
+- `src/do/repo/`: repository Durable Object, streaming receive, compaction, maintenance, storage, DB
 - `src/do/auth/`: authentication Durable Object
 - `src/git/core/`: low-level Git protocol parsing and object helpers
 - `src/git/operations/`: fetch, receive, read-path logic, streaming upload-pack implementation
@@ -119,7 +119,7 @@ Write changes against the current source tree, not the docs alone. Some document
 - The repo Durable Object is the source of truth for a single repository. Keep refs/HEAD authority there.
 - SQLite access for repo metadata must go through `src/do/repo/db/dal.ts`. Do not add ad hoc raw Drizzle queries in unrelated files.
 - `RepoDurableObject.fetch()` intentionally exposes only a small HTTP surface. Keep typed RPC methods as the default internal interface.
-- Receive-pack queuing is intentionally bounded: one active unpack plus one queued `unpackNext`. The preflight in `src/routes/git.ts` and the queueing in the DO must stay consistent.
+- Streaming receive uses a lease model: one active receive lease at a time, acquired via `beginReceive()` and committed via `finalizeReceive()`. Legacy receive-pack queuing (one active unpack plus one queued `unpackNext`) remains for repos in `legacy` mode during the rollback window.
 - Git fetch paths are streaming-sensitive. Avoid unnecessary buffering on upload-pack and pack assembly paths.
 - Push auth is optional by configuration. Do not accidentally require auth when `AUTH_ADMIN_TOKEN` is unset.
 - UI rendering goes through `renderUiView()` and the view registry in `src/client/server/registry.tsx`. New pages should plug into that system rather than inventing a parallel renderer.
@@ -186,7 +186,7 @@ Do not edit generated migrations under `src/drizzle/` manually. Treat `src/do/re
 
 ## Validation By Change Type
 
-- Git protocol, DO, pack, hydration, caching, or routing changes:
+- Git protocol, DO, pack, compaction, caching, or routing changes:
   run `npm run typecheck` and the relevant worker tests in `test/*.worker.test.ts`
 - Auth changes:
   run `npm run test:auth`
@@ -225,4 +225,5 @@ Do not edit generated migrations under `src/drizzle/` manually. Treat `src/do/re
 - Raw SQL/Drizzle access outside the repo DB DAL
 - Accidental route shadowing with `/:owner` and `/:owner/:repo`
 - Converting streaming paths to buffered implementations without a strong reason
+- Re-introducing loose objects as a correctness dependency
 - Assuming README or docs reflect every current file path without checking the source tree

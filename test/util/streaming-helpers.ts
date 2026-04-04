@@ -7,19 +7,12 @@ import { buildPack } from "./git-pack.ts";
 import { buildTreePayload } from "./packed-repo.ts";
 
 export async function promoteToStreaming(owner: string, repo: string) {
-  const shadow = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/storage-mode`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode: "shadow-read" }),
-  });
-  expect(shadow.status).toBe(200);
-
-  const streaming = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/storage-mode`, {
+  const result = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/storage-mode`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mode: "streaming" }),
   });
-  expect(streaming.status).toBe(200);
+  expect(result.status).toBe(200);
 }
 
 export function decodeReportStatus(responseBody: Uint8Array): string[] {

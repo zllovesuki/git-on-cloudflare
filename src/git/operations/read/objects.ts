@@ -2,14 +2,8 @@ import type { CacheContext } from "@/cache/index.ts";
 import type { TreeEntry } from "./types.ts";
 
 import { buildObjectCacheKey, cacheOrLoadObject } from "@/cache/index.ts";
-import { createBlobFromBytes, createLogger, getRepoStub } from "@/common/index.ts";
-import {
-  loadRepoStorageMode,
-  readObject,
-  validatePackedObjectShadowRead,
-} from "@/git/object-store/index.ts";
-import { inflateAndParseHeader } from "@/git/core/index.ts";
-import { countSubrequest, getLimiter } from "../limits.ts";
+import { createBlobFromBytes, createLogger } from "@/common/index.ts";
+import { readObject } from "@/git/object-store/index.ts";
 
 type LooseObjectRead = {
   type: string;
@@ -23,18 +17,6 @@ function ensureMemo(cacheCtx: CacheContext | undefined, repoId: string) {
     return;
   }
   if (!cacheCtx.memo.repoId) cacheCtx.memo.repoId = repoId;
-}
-
-function logOnce(cacheCtx: CacheContext | undefined, flag: string, fn: () => void) {
-  if (!cacheCtx) {
-    fn();
-    return;
-  }
-  cacheCtx.memo = cacheCtx.memo || {};
-  cacheCtx.memo.flags = cacheCtx.memo.flags || new Set<string>();
-  if (cacheCtx.memo.flags.has(flag)) return;
-  fn();
-  cacheCtx.memo.flags.add(flag);
 }
 
 export function parseTree(buf: Uint8Array): TreeEntry[] {
@@ -58,94 +40,10 @@ export function parseTree(buf: Uint8Array): TreeEntry[] {
   return out;
 }
 
-async function readCompatibilityLooseObject(
-  env: Env,
-  repoId: string,
-  oid: string,
-  cacheCtx?: CacheContext
-): Promise<LooseObjectRead | undefined> {
-  ensureMemo(cacheCtx, repoId);
-  const oidLc = oid.toLowerCase();
-  const stub = getRepoStub(env, repoId);
-  const logger = createLogger(env.LOG_LEVEL, {
-    service: "readLooseObjectCompat",
-    repoId,
-    doId: stub.id.toString(),
-  });
-  const limiter = getLimiter(cacheCtx);
-
-  if (cacheCtx?.memo) {
-    const nextCalls = (cacheCtx.memo.loaderCalls ?? 0) + 1;
-    cacheCtx.memo.loaderCalls = nextCalls;
-    const cap = cacheCtx.memo.loaderCap;
-    if (typeof cap === "number" && nextCalls > cap) {
-      cacheCtx.memo.flags = cacheCtx.memo.flags || new Set<string>();
-      cacheCtx.memo.flags.add("loader-capped");
-      logOnce(cacheCtx, "compat-loader-capped-warned", () => {
-        logger.warn("compat:loader-capped", { oid: oidLc, cap });
-      });
-      return undefined;
-    }
-  }
-
-  try {
-    const zdata = await limiter.run("do:get-object-compat", async () => {
-      if (!countSubrequest(cacheCtx)) {
-        logOnce(cacheCtx, "compat-soft-budget-warned", () => {
-          logger.warn("soft-budget-exhausted", {
-            op: "do:get-object-compat",
-            oid: oidLc,
-          });
-        });
-      }
-      return await stub.getObject(oidLc);
-    });
-    if (!zdata) {
-      logger.debug("compat:loose-miss", { oid: oidLc });
-      return undefined;
-    }
-    const parsed = await inflateAndParseHeader(
-      zdata instanceof Uint8Array ? zdata : new Uint8Array(zdata)
-    );
-    if (!parsed) {
-      logger.debug("compat:loose-parse-miss", { oid: oidLc });
-      return undefined;
-    }
-    logger.debug("compat:loose-hit", { oid: oidLc, type: parsed.type });
-    return { type: parsed.type, payload: parsed.payload };
-  } catch (error) {
-    logger.debug("compat:loose-error", { oid: oidLc, error: String(error) });
-    return undefined;
-  }
-}
-
-async function maybeValidateShadowRead(
-  env: Env,
-  repoId: string,
-  oid: string,
-  cacheCtx: CacheContext | undefined,
-  legacy: LooseObjectRead | null | undefined = undefined
-): Promise<void> {
-  try {
-    const mode = await loadRepoStorageMode(env, repoId, cacheCtx);
-    if (mode !== "shadow-read") return;
-    const legacyObject =
-      legacy === undefined
-        ? await readCompatibilityLooseObject(env, repoId, oid, cacheCtx)
-        : legacy || undefined;
-    if (!legacyObject && cacheCtx?.memo?.flags?.has("loader-capped")) {
-      return;
-    }
-    await validatePackedObjectShadowRead(env, repoId, oid, legacyObject, cacheCtx);
-  } catch {
-    // Shadow validation is best-effort and must never affect correctness.
-  }
-}
-
 /**
- * Despite the historical name, this is now the shared pack-first object reader.
- * Loose object RPCs remain only as a compatibility fallback for repos that have
- * not been migrated onto the active pack-catalog read path yet.
+ * Pack-first object reader. Reads git objects from the active pack catalog
+ * via the worker-local object store. This is the sole read path for all
+ * storage modes.
  */
 export async function readLooseObjectRaw(
   env: Env,
@@ -165,12 +63,10 @@ export async function readLooseObjectRaw(
     repoId,
   });
   const bypassCacheRead = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
-  let compatLegacy: LooseObjectRead | null | undefined;
 
-  const loadPackedFirst = async (): Promise<LooseObjectRead | undefined> => {
+  const loadFromPacks = async (): Promise<LooseObjectRead | undefined> => {
     const packed = await readObject(env, repoId, oidLc, cacheCtx);
     if (packed) {
-      compatLegacy = undefined;
       logger.debug("object-read", {
         source: "pack-catalog",
         oid: oidLc,
@@ -179,17 +75,7 @@ export async function readLooseObjectRaw(
       });
       return { type: packed.type, payload: packed.payload };
     }
-
-    const compat = await readCompatibilityLooseObject(env, repoId, oidLc, cacheCtx);
-    compatLegacy = compat || null;
-    if (compat) {
-      logger.debug("object-read", {
-        source: "compat-loose",
-        oid: oidLc,
-        type: compat.type,
-      });
-    }
-    return compat;
+    return undefined;
   };
 
   const storeMemoized = (value: LooseObjectRead | undefined) => {
@@ -201,17 +87,14 @@ export async function readLooseObjectRaw(
   if (cacheCtx) {
     const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
     const loaded = bypassCacheRead
-      ? await loadPackedFirst()
-      : await cacheOrLoadObject(cacheKey, loadPackedFirst, cacheCtx.ctx);
+      ? await loadFromPacks()
+      : await cacheOrLoadObject(cacheKey, loadFromPacks, cacheCtx.ctx);
 
     storeMemoized(loaded);
-
-    await maybeValidateShadowRead(env, repoId, oidLc, cacheCtx, compatLegacy);
     return loaded;
   }
 
-  const loaded = await loadPackedFirst();
-  await maybeValidateShadowRead(env, repoId, oidLc, cacheCtx, compatLegacy);
+  const loaded = await loadFromPacks();
   return loaded;
 }
 

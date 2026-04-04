@@ -55,7 +55,7 @@ git push https://owner:token@your-domain.com/owner/repo main
   Capability advertisement for push operations.
 
 - **`POST /:owner/:repo/git-receive-pack`**  
-  Push objects. Receives pack data and updates refs. Requires authentication if `AUTH_ADMIN_TOKEN` is configured.
+  Push objects. In streaming mode (default), the Worker writes `.pack` and `.idx` to R2 and commits metadata atomically via DO RPCs. In legacy mode, forwards to DO `POST /receive` for buffered processing. Requires authentication if `AUTH_ADMIN_TOKEN` is configured.
 
 ## Web UI Routes
 
@@ -178,16 +178,13 @@ All admin endpoints require authentication with owner tokens.
   Check if a specific OID exists across loose, R2 loose, and packs  
   Params: `:oid` is a 40-hex SHA
 
-### Hydration Endpoints
+### Compaction Aliases (compatibility, rollback window)
 
 - **`POST /:owner/:repo/admin/hydrate`**  
-  Trigger repository hydration.  
-  Body: `{ "dryRun"?: boolean }` (defaults to true).  
-  Returns dry-run plan when `dryRun` is true; enqueues work and returns 202 when `dryRun` is false.
+  Compatibility alias for `POST /admin/compact`. Previews compaction (`dryRun=true`, the default) or enqueues compaction work (`dryRun=false`). Does not trigger legacy hydration.
 
 - **`DELETE /:owner/:repo/admin/hydrate`**  
-  Clear hydration state and remove hydration-generated packs.  
-  Returns counts of cleared items.
+  Compatibility alias for `DELETE /admin/compact`. Clears recorded compaction request.
 
 ### Pack Management
 

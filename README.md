@@ -1,6 +1,5 @@
 # git-on-cloudflare
 
-[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-f38020?logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/workers/)
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zllovesuki/git-on-cloudflare)
 
 **A Git Smart HTTP v2 server running entirely on Cloudflare Workers** — no VMs, no containers, just Durable Objects and R2.
@@ -13,7 +12,7 @@ Host unlimited private Git repositories at the edge with <50ms response times gl
 - **Strong consistency** via Durable Objects for refs/HEAD (the hard part of distributed Git)
 - **Two-tier caching** reducing latency from 200ms to <50ms for hot paths
 - **Streaming pack assembly** from R2 with range reads for efficient clones
-- **Time-budgeted background unpacking** handles large pushes without blocking
+- **Streaming push pipeline** with atomic pack ingress and queue-driven compaction
 - **Modern web UI** with Tailwind CSS v4, React SSR, and focused client islands
 - **Interactive merge commit exploration** - expand merge commits to see side branch history
 - **Safer raw views**: `text/plain` for `/raw` by default and same‑origin Referer check for `/rawpath` to prevent hotlinking
@@ -61,10 +60,8 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 ### Implementation Details
 
 - Complete Git pack protocol v2 with `ls-refs` and `fetch` commands
-- Time-budgeted unpacking keeps pushes under 30s CPU limit
-- Receive-pack queue: at most 2 concurrent pushes (one-deep).
+- Streaming receive writes packs directly to R2 with atomic metadata commit
 - PBKDF2-SHA256 (100k iterations) for auth tokens
-- Background object mirroring from DO to R2 for read scaling
 - Modern web UI with Tailwind CSS v4, React page components, and worker-side SSR
 - SQLite-backed metadata inside Durable Objects using `drizzle-orm/durable-sqlite`
 - Structured JSON logging with `LOG_LEVEL` (debug/info/warn/error)
@@ -83,6 +80,8 @@ npm run deploy
 ```
 
 Your Git server will deploy to your configured route or to `*.workers.dev`, depending on your Wrangler configuration. Push repos, browse code, manage auth — all from the edge.
+
+> **Upgrading?** If upgrading from a commit before `a76650c`, read `MIGRATION-STREAMING-PUSH.md` for the required deployment sequence.
 
 ## Authentication
 

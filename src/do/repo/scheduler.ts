@@ -23,7 +23,7 @@ export async function planNextAlarm(
   const repoStorageMode = (await store.get("repoStorageMode")) || "legacy";
 
   // 1) Streaming repos re-arm compaction via alarms and ignore stale legacy
-  // unpack/hydration state. Legacy and shadow-read keep the old order.
+  // unpack/hydration state. Legacy repos keep the old order.
   if (repoStorageMode === "streaming") {
     try {
       const [compactionWantedAt, receiveLease, compactLease] = await Promise.all([

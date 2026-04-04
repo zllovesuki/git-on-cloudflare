@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Eye, History, PackageCheck, Rocket } from "lucide-react";
+import { AlertTriangle, Check, History, PackageCheck, Rocket } from "lucide-react";
 import { Badge } from "@/client/components/ui/badge";
 import { Button } from "@/client/components/ui/button";
 import { Card } from "@/client/components/ui/card";
@@ -19,44 +19,14 @@ export type StorageModeCardProps = {
   requestLegacyCompatBackfill: () => Promise<void>;
 };
 
-// -- Pipeline definition ------------------------------------------------------
-
-type PipelineStep = {
-  mode: RepoStorageMode;
-  label: string;
-  icon: typeof Eye;
-};
-
-const MODE_PIPELINE: PipelineStep[] = [
-  { mode: "legacy", label: "Legacy", icon: History },
-  { mode: "shadow-read", label: "Shadow-read", icon: Eye },
-  { mode: "streaming", label: "Streaming", icon: Rocket },
-];
-
-// Forward action labels per target mode
-const FORWARD_LABELS: Partial<Record<RepoStorageMode, { label: string; pendingLabel: string }>> = {
-  "shadow-read": { label: "Enable shadow-read", pendingLabel: "Saving..." },
-  streaming: { label: "Enable streaming receive", pendingLabel: "Saving..." },
-};
-
-// Rollback action labels per target mode
-const ROLLBACK_LABELS: Partial<Record<RepoStorageMode, { label: string; pendingLabel: string }>> = {
-  legacy: { label: "Return to legacy", pendingLabel: "Saving..." },
-  "shadow-read": { label: "Revert to shadow-read", pendingLabel: "Saving..." },
-};
-
 // -- Contextual guidance per mode ---------------------------------------------
 
 function buildGuidance(control: RepoStorageModeControl): string {
   if (control.currentMode === "legacy") {
     if (control.activePackCount === 0) {
-      return "No active packs yet \u2014 push data before enabling shadow-read.";
+      return "No active packs yet \u2014 push data before promoting to streaming.";
     }
-    return "Enable shadow-read to begin validating pack-first reads against compatibility reads.";
-  }
-
-  if (control.currentMode === "shadow-read") {
-    return "Validation is active \u2014 watch for compatibility mismatches before advancing to streaming.";
+    return "Legacy receive/unpack/hydration paths are active. Promote to streaming when ready.";
   }
 
   // streaming
@@ -96,44 +66,43 @@ const COMPAT_BADGE: Record<
 
 // -- Sub-components -----------------------------------------------------------
 
-/** Horizontal stepper showing the three-stage migration pipeline. */
-function MigrationStepper({ currentMode }: { currentMode: RepoStorageMode }) {
-  const currentIndex = MODE_PIPELINE.findIndex((s) => s.mode === currentMode);
+/** Two-state toggle showing the current storage mode. */
+function ModeIndicator({ currentMode }: { currentMode: RepoStorageMode }) {
+  const modes = [
+    { mode: "legacy" as const, label: "Legacy", icon: History },
+    { mode: "streaming" as const, label: "Streaming", icon: Rocket },
+  ];
 
   return (
     <div className="flex items-center">
-      {MODE_PIPELINE.map((step, i) => {
+      {modes.map((step, i) => {
         const StepIcon = step.icon;
-        const isCompleted = i < currentIndex;
-        const isActive = i === currentIndex;
+        const isActive = step.mode === currentMode;
+        const isPast = currentMode === "streaming" && step.mode === "legacy";
 
-        // Circle styling
         const circleBase = "flex h-8 w-8 shrink-0 items-center justify-center rounded-full";
         const circleClasses = isActive
           ? `${circleBase} bg-accent-500 text-white ring-2 ring-accent-500/30 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900`
-          : isCompleted
+          : isPast
             ? `${circleBase} bg-accent-500/20 text-accent-600 dark:text-accent-400`
             : `${circleBase} border-2 border-zinc-300 text-zinc-400 dark:border-zinc-700 dark:text-zinc-500`;
 
-        // Label styling
         const labelClasses = isActive
           ? "mt-1.5 text-xs font-semibold text-accent-600 dark:text-accent-400"
           : "mt-1.5 text-xs text-zinc-500 dark:text-zinc-400";
 
         return (
           <div key={step.mode} className="contents">
-            {/* Connector line before this step (skip for first step) */}
             {i > 0 && (
               <div
                 className={`h-0.5 flex-1 ${
-                  i <= currentIndex ? "bg-accent-500/40" : "bg-zinc-200 dark:bg-zinc-700"
+                  isPast || isActive ? "bg-accent-500/40" : "bg-zinc-200 dark:bg-zinc-700"
                 }`}
               />
             )}
-            {/* Step node */}
             <div className="flex w-24 flex-col items-center">
               <div className={circleClasses}>
-                {isCompleted ? (
+                {isPast ? (
                   <Check className="h-4 w-4" aria-hidden="true" />
                 ) : (
                   <StepIcon className="h-4 w-4" aria-hidden="true" />
@@ -196,17 +165,14 @@ export function StorageModeCard({
     );
   }
 
-  const currentIndex = MODE_PIPELINE.findIndex((s) => s.mode === control.currentMode);
   const repoBusy = control.receiveActive || control.compactionActive;
   const hasBlockers = control.blockers.length > 0;
   const guidance = buildGuidance(control);
 
-  // Forward: the next step in the pipeline (if any)
-  const nextStep = currentIndex < MODE_PIPELINE.length - 1 ? MODE_PIPELINE[currentIndex + 1] : null;
-  const forwardLabels = nextStep ? FORWARD_LABELS[nextStep.mode] : undefined;
-
-  // Rollback: all pipeline modes with a lower index
-  const rollbackTargets = MODE_PIPELINE.filter((_, i) => i < currentIndex);
+  // The toggle target: switch to the other mode
+  const targetMode: RepoStorageMode = control.currentMode === "legacy" ? "streaming" : "legacy";
+  const pendingKey = `storage-mode:${targetMode}`;
+  const isPending = !!pending[pendingKey];
 
   // Backfill is only actionable in streaming mode when not already in progress
   const canRequestBackfill =
@@ -219,8 +185,8 @@ export function StorageModeCard({
     <Card>
       <h2 className="mb-4 text-xl font-semibold">Storage Mode</h2>
 
-      {/* Pipeline stepper */}
-      <MigrationStepper currentMode={control.currentMode} />
+      {/* Two-state indicator */}
+      <ModeIndicator currentMode={control.currentMode} />
 
       {/* Contextual panel */}
       <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
@@ -263,20 +229,16 @@ export function StorageModeCard({
 
         {/* Actions */}
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          {/* Forward action */}
-          {nextStep && forwardLabels && (
+          {/* Forward: promote to streaming */}
+          {control.currentMode === "legacy" && (
             <Button
               variant="primary"
               type="button"
-              onClick={() => void setStorageMode(nextStep.mode)}
-              disabled={hasBlockers || repoBusy || !!pending[`storage-mode:${nextStep.mode}`]}
+              onClick={() => void setStorageMode("streaming")}
+              disabled={hasBlockers || repoBusy || isPending}
             >
-              <nextStep.icon className="mr-2 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
-              <span className="label">
-                {pending[`storage-mode:${nextStep.mode}`]
-                  ? forwardLabels.pendingLabel
-                  : forwardLabels.label}
-              </span>
+              <Rocket className="mr-2 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
+              <span className="label">{isPending ? "Saving..." : "Enable streaming receive"}</span>
             </Button>
           )}
 
@@ -296,26 +258,19 @@ export function StorageModeCard({
             </Button>
           )}
 
-          {/* Rollback actions — ghost buttons, visually de-emphasized */}
-          {rollbackTargets.map((target) => {
-            const labels = ROLLBACK_LABELS[target.mode];
-            if (!labels) return null;
-            const pendingKey = `storage-mode:${target.mode}`;
-            const isPending = !!pending[pendingKey];
-            return (
-              <Button
-                key={target.mode}
-                variant="ghost"
-                size="sm"
-                type="button"
-                onClick={() => void setStorageMode(target.mode)}
-                disabled={hasBlockers || repoBusy || isPending}
-              >
-                <History className="mr-1.5 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
-                <span className="label">{isPending ? labels.pendingLabel : labels.label}</span>
-              </Button>
-            );
-          })}
+          {/* Rollback: revert to legacy */}
+          {control.currentMode === "streaming" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              type="button"
+              onClick={() => void setStorageMode("legacy")}
+              disabled={hasBlockers || repoBusy || isPending}
+            >
+              <History className="mr-1.5 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
+              <span className="label">{isPending ? "Saving..." : "Return to legacy"}</span>
+            </Button>
+          )}
         </div>
       </div>
 

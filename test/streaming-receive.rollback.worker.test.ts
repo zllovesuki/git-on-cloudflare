@@ -153,12 +153,12 @@ describe("streaming receive rollback preparation", () => {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "shadow-read" }),
+        body: JSON.stringify({ mode: "legacy" }),
       }
     );
     expect(rollbackResponse.status).toBe(200);
     const rollbackJson = (await rollbackResponse.json()) as { currentMode?: string };
-    expect(rollbackJson.currentMode).toBe("shadow-read");
+    expect(rollbackJson.currentMode).toBe("legacy");
   });
 
   it("marks rollback data stale after a later streaming push changes the pack catalog", async () => {

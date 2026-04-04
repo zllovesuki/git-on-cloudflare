@@ -9,7 +9,6 @@
 
 import { asBodyInit } from "@/common/webtypes.ts";
 import type { IdxView, PackCatalogRow, PackedObjectResult } from "@/git/object-store/types.ts";
-import type { RepoStorageMode } from "@/do/repo/repoState.ts";
 
 const CACHE_NAME_JSON = "git-on-cf:json";
 const CACHE_NAME_OBJECTS = "git-on-cf:objects";
@@ -29,10 +28,6 @@ export interface RequestMemo {
   packCatalog?: PackCatalogRow[];
   /** In-flight promise for the active pack catalog */
   packCatalogPromise?: Promise<PackCatalogRow[]>;
-  /** Worker-side repo storage mode */
-  repoStorageMode?: RepoStorageMode;
-  /** In-flight promise for the repo storage mode */
-  repoStorageModePromise?: Promise<RepoStorageMode>;
   /** Parsed idx views keyed by full pack key */
   idxViews?: Map<string, IdxView>;
   /** In-flight idx view loads keyed by pack key plus size hint when present */
@@ -43,10 +38,6 @@ export interface RequestMemo {
   packedObjectPromises?: Map<string, Promise<PackedObjectResult | undefined>>;
   /** Small flags set for once-per-request log throttling and guards */
   flags?: Set<string>;
-  /** Count of compatibility loose-object RPC reads (stub.getObject) within this request */
-  loaderCalls?: number;
-  /** Soft cap for compatibility loose-object RPC reads within this request */
-  loaderCap?: number;
   /** Optional per-request soft subrequest budget to degrade before hitting platform hard limits */
   subreqBudget?: number;
   /** Optional concurrency limiter for upstream calls; must provide a run(label, fn) API */

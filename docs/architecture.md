@@ -9,7 +9,7 @@ The codebase is organized into focused modules with `index.ts` export files:
 - **`/git`** - Core Git functionality
   - `operations/` - Git operations (upload-pack, receive-pack)
   - `core/` - Protocol handling, pkt-line, readers
-  - `pack/` - Pack assembly, unpacking, indexing
+  - `pack/` - Pack assembly, indexing
 - **`/do`** - Durable Objects
   - `repo/repoDO.ts` - Repository Durable Object (per-repo authority)
   - `auth/authDO.ts` - Authentication Durable Object
@@ -46,18 +46,21 @@ The codebase is organized into focused modules with `index.ts` export files:
 
 ### Repository DO (`src/do/repo/repoDO.ts`)
 
-- Owns refs/HEAD and loose objects for a single repo
+- Metadata authority for a single repo. The data plane lives in R2 packs.
 - HTTP endpoints (minimal):
-  - `POST /receive` — receive-pack (push) handler
+  - `POST /receive` — legacy receive-pack handler (rollback window only)
 - Typed RPC methods (selected):
   - `listRefs()`, `setRefs()`, `getHead()`, `setHead()`, `getHeadAndRefs()`
-  - `getObjectStream()`, `getObject()`, `getObjectSize()`
-  - `getPackLatest()`, `getPacks()`, `getPackOids()`, `getPackOidsBatch()`
-  - `getUnpackProgress()` — unpacking status/progress for UI gating (includes `queuedCount` and `currentPackKey`)
-- Push flow: raw `.pack` is written to R2, a fast index-only step writes `.idx`, and unpack is queued for background processing on the DO alarm in small time-budgeted chunks.
-- Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`). Exact pack membership lives in SQLite (`pack_objects`), not in KV.
+  - `beginReceive()`, `finalizeReceive()`, `abortReceive()` — streaming receive lease lifecycle
+  - `beginCompaction()`, `commitCompaction()` — queue-driven pack compaction
+  - `getActivePackCatalog()` — pack catalog snapshot for worker-local reads
+  - `getRepoStorageMode()`, `setRepoStorageModeGuarded()` — two-state mode toggle (`legacy` ↔ `streaming`)
+  - `getUnpackProgress()` — legacy unpacking status (rollback window)
+- Streaming push (default): the Worker writes `.pack` and `.idx` to R2, then commits refs and pack-catalog metadata atomically through typed DO RPCs.
+- Legacy push (rollback window): raw `.pack` is written to R2, a fast index-only step writes `.idx`, and unpack is queued for background processing via DO alarm.
+- Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`). Exact pack membership lives in `.idx` files in R2, with SQLite (`pack_objects`) as a legacy mirror.
 
-#### Receive-pack queueing
+#### Receive-pack queueing (legacy mode only)
 
 - The DO maintains at most one active unpack (`unpackWork`) and a one-deep next slot (`unpackNext`).
 - When a push arrives while unpacking is active:
@@ -83,13 +86,11 @@ The codebase is organized into focused modules with `index.ts` export files:
 - The Repository DO maintains a small SQLite database using `drizzle-orm/durable-sqlite` for metadata that benefits from indexed lookups and batch queries.
 - Migrations run during DO initialization via `migrate(db, migrations)` and Wrangler `new_sqlite_classes` (see `wrangler.jsonc` and `drizzle.config.ts`).
 - Tables:
-  - `pack_objects(pack_key, oid)` — exact membership of OIDs per pack; indexed by `oid` for fast lookups and batched IN queries.
-  - `hydr_cover(work_id, oid)` — hydration coverage set per work id to build thick packs.
-  - `hydr_pending(work_id, kind, oid)` — pending OIDs for hydration work; `kind` ∈ {`base`, `loose`}; PK `(work_id, kind, oid)` and index on `(work_id, kind)`.
+  - `pack_catalog(pack_key, ...)` — authoritative pack metadata: key, state, tier, sequence range, object count, byte sizes, creation/supersession timestamps. Drives both read-path discovery and compaction planning.
+  - `pack_objects(pack_key, oid)` — legacy OID membership per pack; still populated for rollback compatibility. `.idx` files in R2 are authoritative for read-path lookups.
+  - `hydr_cover(work_id, oid)` — hydration coverage set per work id (legacy rollback window).
+  - `hydr_pending(work_id, kind, oid)` — pending OIDs for hydration work (legacy rollback window).
 - Access policy: all SQLite operations must go through the DAL (`src/do/repo/db/dal.ts`). Avoid raw drizzle queries outside the DAL.
-- Usage highlights:
-  - `getPackOidsBatch()` efficiently loads OID membership for multiple packs in one call.
-  - Hydration stores coverage in SQLite and emits thick packs (no deltas) while persisting pack membership immediately for robust coverage.
 - Registry note: owner→repo registry still uses Workers KV (`OWNER_REGISTRY`) for the web UI owner listing. Pack discovery and membership no longer use KV.
 
 ### Static assets and UI rendering (env.ASSETS + React SSR)
@@ -103,18 +104,17 @@ The codebase is organized into focused modules with `index.ts` export files:
 
 ## Background processing and alarms
 
-- The repo DO `alarm()` performs multiple duties:
-  1. Unpack chunks within a time budget
-  2. Hydration slices (resumable segment building and coverage thickening)
-  3. Idle cleanup for empty, idle repos
-  4. Periodic pack maintenance (prune old packs + metadata)
-  - `handleUnpackWork()` - Processes pending unpack work
-  - Hydration helpers: `startHydration()` (RPC), `clearHydration()` (RPC), `processHydrationSlice()`
+- The repo DO `alarm()` is mode-aware:
+  - **Streaming repos**: lightweight lease cleanup, compaction queue re-arm, idle cleanup.
+  - **Legacy repos (rollback window)**: unpack chunks within a time budget, hydration slices (resumable segment building and coverage thickening), idle cleanup, and periodic pack maintenance.
+- Helpers:
+  - `handleUnpackWork()` - Processes pending unpack work (legacy mode)
+  - `rearmCompactionQueueFromAlarm()` - Triggers compaction when requested (streaming mode)
+  - Hydration helpers: `startHydration()` (RPC), `clearHydration()` (RPC), `processHydrationSlice()` (legacy mode)
   - `handleIdleAndMaintenance()` - Manages idle cleanup and maintenance
   - `shouldCleanupIdle()` - Determines if cleanup is needed
   - `performIdleCleanup()` - Executes cleanup
   - `purgeR2Mirror()` - Handles R2 cleanup
-- Unpack chunking is controlled via env vars: `REPO_UNPACK_CHUNK_SIZE`, `REPO_UNPACK_MAX_MS`, `REPO_UNPACK_DELAY_MS`, `REPO_UNPACK_BACKOFF_MS`.
 
 ## Logging
 

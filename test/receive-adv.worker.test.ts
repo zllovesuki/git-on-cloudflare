@@ -8,6 +8,11 @@ import { promoteToStreaming } from "./util/streaming-helpers.ts";
 it("advertises legacy receive-pack capabilities without side-band-64k", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-recv-adv");
+  const repoId = `${owner}/${repo}`;
+
+  // Seed a legacy repo with packs so it has refs and stays in legacy mode
+  await seedPackFirstRepo(repoId);
+
   const url = new URL(`https://example.com/${owner}/${repo}/info/refs`);
   url.searchParams.set("service", "git-receive-pack");
 

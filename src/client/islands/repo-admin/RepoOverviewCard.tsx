@@ -32,12 +32,7 @@ export function RepoOverviewCard({
 }: RepoOverviewCardProps) {
   const [copiedDoId, setCopiedDoId] = useState(false);
   const activePackCount = Array.isArray(state.activePacks) ? state.activePacks.length : packCount;
-  const storageModeLabel =
-    state.repoStorageMode === "shadow-read"
-      ? "shadow-read"
-      : state.repoStorageMode === "streaming"
-        ? "streaming"
-        : "legacy";
+  const storageModeLabel = state.repoStorageMode === "streaming" ? "streaming" : "legacy";
 
   async function copyDoId(doId: string) {
     try {

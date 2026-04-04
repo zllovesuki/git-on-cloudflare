@@ -3,12 +3,16 @@ import { env, SELF } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import { encodeGitObjectAndDeflate, listCommitChangedFiles, readCommitFilePatch } from "@/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
+import { registerTestPack } from "./util/packed-repo.ts";
 
 type TreeSpec = {
   mode: string;
   name: string;
   oid: string;
 };
+
+/** Collector for pack registration. Accumulates objects for packing after seeding. */
+type PackCollector = { type: string; payload: Uint8Array }[];
 
 async function putObject(
   getStub: () => DurableObjectStub<RepoDurableObject>,
@@ -28,11 +32,20 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-async function createBlob(content: string): Promise<{ oid: string; zdata: Uint8Array }> {
-  return await encodeGitObjectAndDeflate("blob", new TextEncoder().encode(content));
+type GitObject = {
+  oid: string;
+  zdata: Uint8Array;
+  type: "commit" | "tree" | "blob" | "tag";
+  payload: Uint8Array;
+};
+
+async function createBlob(content: string): Promise<GitObject> {
+  const payload = new TextEncoder().encode(content);
+  const result = await encodeGitObjectAndDeflate("blob", payload);
+  return { ...result, type: "blob", payload };
 }
 
-async function createTree(entries: TreeSpec[]): Promise<{ oid: string; zdata: Uint8Array }> {
+async function createTree(entries: TreeSpec[]): Promise<GitObject> {
   const encoder = new TextEncoder();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -51,20 +64,37 @@ async function createTree(entries: TreeSpec[]): Promise<{ oid: string; zdata: Ui
     payload.set(chunk, offset);
     offset += chunk.length;
   }
-  return await encodeGitObjectAndDeflate("tree", payload);
+  const result = await encodeGitObjectAndDeflate("tree", payload);
+  return { ...result, type: "tree", payload };
 }
 
 async function createCommit(args: {
   treeOid: string;
   parents?: string[];
   message: string;
-}): Promise<{ oid: string; zdata: Uint8Array }> {
+}): Promise<GitObject> {
   const author = "You <you@example.com> 0 +0000";
   const parentLines = (args.parents || []).map((parent) => `parent ${parent}\n`).join("");
   const payload = new TextEncoder().encode(
     `tree ${args.treeOid}\n${parentLines}author ${author}\ncommitter ${author}\n\n${args.message}\n`
   );
-  return await encodeGitObjectAndDeflate("commit", payload);
+  const result = await encodeGitObjectAndDeflate("commit", payload);
+  return { ...result, type: "commit", payload };
+}
+
+/** Register all accumulated objects as a pack so the pack-first read path can find them. */
+async function packAll(
+  repoId: string,
+  getStub: () => DurableObjectStub<RepoDurableObject>,
+  objects: GitObject[]
+): Promise<void> {
+  await registerTestPack({
+    env,
+    repoId,
+    getStub,
+    packName: `pack-diff-${Date.now()}.pack`,
+    objects: objects.map((o) => ({ type: o.type, payload: o.payload })),
+  });
 }
 
 async function setMainRef(
@@ -94,6 +124,7 @@ describe("commit diff v1", () => {
     const commit = await createCommit({ treeOid: tree.oid, message: "root" });
     await putObject(getStub, commit.oid, commit.zdata);
     await setMainRef(getStub, commit.oid);
+    await packAll(repoId, getStub, [readme, tree, commit]);
 
     const diff = await listCommitChangedFiles(env as Env, repoId, commit.oid);
 
@@ -160,6 +191,17 @@ describe("commit diff v1", () => {
     });
     await putObject(getStub, nextCommit.oid, nextCommit.zdata);
     await setMainRef(getStub, nextCommit.oid);
+    await packAll(repoId, getStub, [
+      oldFile,
+      oldConfig,
+      baseTree,
+      baseCommit,
+      newFile,
+      nestedConfig,
+      configDir,
+      nextTree,
+      nextCommit,
+    ]);
 
     const diff = await listCommitChangedFiles(env as Env, repoId, nextCommit.oid);
 
@@ -201,6 +243,7 @@ describe("commit diff v1", () => {
 
     const commit = await createCommit({ treeOid: tree.oid, message: "root" });
     await putObject(getStub, commit.oid, commit.zdata);
+    await packAll(repoId, getStub, [alpha, beta, gamma, tree, commit]);
 
     const diff = await listCommitChangedFiles(env as Env, repoId, commit.oid, undefined, {
       maxFiles: 2,
@@ -232,6 +275,7 @@ describe("commit diff v1", () => {
 
     const commit = await createCommit({ treeOid: tree.oid, message: "root" });
     await putObject(getStub, commit.oid, commit.zdata);
+    await packAll(repoId, getStub, [alpha, beta, tree, commit]);
 
     const realNow = Date.now;
     let tick = 0;
@@ -275,6 +319,7 @@ describe("commit diff v1", () => {
       message: "head",
     });
     await putObject(getStub, headCommit.oid, headCommit.zdata);
+    await packAll(repoId, getStub, [before, after, baseTree, baseCommit, headTree, headCommit]);
 
     const patch = await readCommitFilePatch(env as Env, repoId, headCommit.oid, "note.txt");
 
@@ -311,6 +356,7 @@ describe("commit diff v1", () => {
       message: "head",
     });
     await putObject(getStub, headCommit.oid, headCommit.zdata);
+    await packAll(repoId, getStub, [before, after, baseTree, baseCommit, headTree, headCommit]);
 
     const patch = await readCommitFilePatch(env as Env, repoId, headCommit.oid, "data.bin");
 
@@ -335,6 +381,7 @@ describe("commit diff v1", () => {
     const commit = await createCommit({ treeOid: tree.oid, message: "root" });
     await putObject(getStub, commit.oid, commit.zdata);
     await setMainRef(getStub, commit.oid);
+    await packAll(repoId, getStub, [readme, tree, commit]);
 
     const res = await SELF.fetch(
       `https://example.com/${owner}/${repo}/commit/${commit.oid}/diff?path=${encodeURIComponent("README.md")}`
@@ -407,6 +454,18 @@ describe("commit diff v1", () => {
     });
     await putObject(getStub, mergeCommit.oid, mergeCommit.zdata);
     await setMainRef(getStub, mergeCommit.oid);
+    await packAll(repoId, getStub, [
+      alpha,
+      beta,
+      rootTree,
+      rootCommit,
+      firstParentTree,
+      firstParentCommit,
+      secondParentTree,
+      secondParentCommit,
+      mergeTree,
+      mergeCommit,
+    ]);
 
     const res = await SELF.fetch(`https://example.com/${owner}/${repo}/commit/${mergeCommit.oid}`);
     expect(res.status).toBe(200);

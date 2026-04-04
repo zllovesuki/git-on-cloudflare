@@ -1,7 +1,7 @@
 // Typed schema for Repo Durable Object storage
 // Provides a light wrapper to get strong typing on storage keys/values in tests and code.
 
-export type RepoStorageMode = "legacy" | "shadow-read" | "streaming";
+export type RepoStorageMode = "legacy" | "streaming";
 
 export type ObjKey = `obj:${string}`;
 export type PackOidsKey = `packOids:${string}`;

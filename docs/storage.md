@@ -1,41 +1,42 @@
 # Storage Model (DO + R2)
 
-This project uses a hybrid storage approach to balance strong consistency for refs and hot objects with cheap, scalable storage for large data:
+This project uses a hybrid storage approach to balance strong consistency for refs and metadata with cheap, scalable storage for pack data:
 
 ## Durable Objects (DO) storage
 
-- Per-repo, strongly consistent state
+- Per-repo, strongly consistent state (the metadata authority)
 - Stores:
   - `refs` (array of `{ name, oid }`)
   - `head` (object with `target`, optional `oid`, `unborn`)
-  - Loose objects (zlib-compressed, raw Git format `type size\0payload`)
+  - `repoStorageMode` (`"legacy"` or `"streaming"`)
+  - Lease state (`receiveLease`, `compactLease`)
+  - Legacy loose objects (zlib-compressed, raw Git format) — used only by rollback compatibility paths
 - Access patterns:
-  - Always consistent; great for writes and cache-like reads
+  - Always consistent; great for writes and metadata reads
 
 ### SQLite metadata in Durable Objects
 
 - A small SQLite database is embedded in each Repository DO using `drizzle-orm/durable-sqlite`.
-- Purpose: store indexed metadata that benefits fetch and hydration flows.
 - Tables:
-  - `pack_objects(pack_key, oid)` — exact per-pack membership; indexed by `oid` for fast lookups.
-  - `hydr_cover(work_id, oid)` — coverage set for hydration segments.
-  - `hydr_pending(work_id, kind, oid)` — pending OIDs for hydration work; `kind` ∈ {`base`, `loose`}; primary key `(work_id, kind, oid)` and index on `(work_id, kind)`.
+  - `pack_catalog(pack_key, ...)` — authoritative pack metadata. Drives read-path discovery and compaction planning.
+  - `pack_objects(pack_key, oid)` — legacy per-pack OID membership mirror. `.idx` files in R2 are authoritative for read-path lookups.
+  - `hydr_cover(work_id, oid)` — hydration coverage set (legacy rollback window).
+  - `hydr_pending(work_id, kind, oid)` — pending OIDs for hydration work (legacy rollback window).
 - Migrations run during DO initialization via `migrate(db, migrations)` and Wrangler `new_sqlite_classes` (see `wrangler.jsonc` and `drizzle.config.ts`).
-- Enables efficient batch queries such as `getPackOidsBatch()` and robust coverage checks.
 
 Note: All SQLite access goes through the data access layer (DAL) in `src/do/repo/db/dal.ts`. Avoid raw drizzle queries outside the DAL.
 
 ## R2 storage
 
-- Large, cheap object store
+- Large, cheap object store for the data plane
 - Stores under a per-DO prefix: `do/<do-id>/...`
 - Objects:
   - Pack files: `do/<id>/objects/pack/<name>.pack`
-  - Pack indexes: `do/<id>/objects/pack/<name>.idx`
-  - Mirrored loose objects: `do/<id>/objects/loose/<oid>`
+  - Pack indexes: `do/<id>/objects/pack/<name>.idx` — authoritative for pack membership and object lookup
+  - Mirrored loose objects: `do/<id>/objects/loose/<oid>` (legacy compatibility)
 - Access patterns:
   - Range reads for packfile assembly (cheap and efficient)
-  - HEAD requests to get object sizes without transferring data
+  - `.idx` fanout reads for object discovery and location
 
 ## Key conventions (src/keys.ts)
 
@@ -50,5 +51,5 @@ Note: All SQLite access goes through the data access layer (DAL) in `src/do/repo
 ## Why this design
 
 - DO provides strong consistency for refs and state transitions (e.g., atomic ref updates during push)
-- R2 provides cheap, scalable storage for large packfiles, with range-read support ideal for fetch assembly
-- Mirroring loose objects to R2 reduces DO CPU during reads and enables HEAD size checks for the web UI
+- R2 provides cheap, scalable storage for pack data, with range-read support ideal for fetch assembly
+- Streaming receive writes packs directly to R2 with atomic metadata commit — no intermediate buffering or unpacking
