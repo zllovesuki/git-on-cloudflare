@@ -10,6 +10,11 @@ export function getRepoStub(env: Env, repoId: string): DurableObjectStub<RepoDur
   return env.REPO_DO.get(id);
 }
 
+export function getRepoStubByDoId(env: Env, doId: string): DurableObjectStub<RepoDurableObject> {
+  const id = env.REPO_DO.idFromString(doId);
+  return env.REPO_DO.get(id);
+}
+
 export function getAuthStub(env: Env): DurableObjectStub<AuthDurableObject> | null {
   // Enforce centralized auth only when both AUTH_DO and AUTH_ADMIN_TOKEN are set
   const ns = env.AUTH_DO;

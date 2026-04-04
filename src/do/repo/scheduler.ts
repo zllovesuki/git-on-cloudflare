@@ -2,6 +2,8 @@ import type { RepoStateSchema } from "./repoState.ts";
 import { asTypedStorage } from "./repoState.ts";
 import { getConfig } from "./repoConfig.ts";
 import { createLogger } from "@/common/index.ts";
+import { activeLeaseOrUndefined } from "./catalog/activity.ts";
+import { COMPACTION_REARM_DELAY_MS } from "./catalog/shared.ts";
 
 /**
  * Plan the next alarm time purely from existing DO state and repo config.
@@ -11,59 +13,91 @@ export async function planNextAlarm(
   state: DurableObjectState,
   env: Env,
   now = Date.now()
-): Promise<{ when: number; reason: "unpack" | "hydration" | "idle" | "maint" } | null> {
+): Promise<{
+  when: number;
+  reason: "unpack" | "hydration" | "compaction" | "idle" | "maint";
+} | null> {
   const log = createLogger(env.LOG_LEVEL, { service: "Scheduler", doId: state.id.toString() });
   const store = asTypedStorage<RepoStateSchema>(state.storage);
   const cfg = getConfig(env);
+  const repoStorageMode = (await store.get("repoStorageMode")) || "legacy";
 
-  // 1) Unpack has highest priority
-  try {
-    const [unpackWork, unpackNext] = await Promise.all([
-      store.get("unpackWork"),
-      store.get("unpackNext"),
-    ]);
-    if (unpackWork || unpackNext) {
-      return { when: now + cfg.unpackDelayMs, reason: "unpack" };
+  // 1) Streaming repos re-arm compaction via alarms and ignore stale legacy
+  // unpack/hydration state. Legacy and shadow-read keep the old order.
+  if (repoStorageMode === "streaming") {
+    try {
+      const [compactionWantedAt, receiveLease, compactLease] = await Promise.all([
+        store.get("compactionWantedAt"),
+        store.get("receiveLease"),
+        store.get("compactLease"),
+      ]);
+
+      const activeReceiveLease = activeLeaseOrUndefined(receiveLease, now);
+      if (activeReceiveLease) {
+        return { when: activeReceiveLease.expiresAt, reason: "compaction" };
+      }
+
+      const activeCompactLease = activeLeaseOrUndefined(compactLease, now);
+      if (activeCompactLease) {
+        return { when: activeCompactLease.expiresAt, reason: "compaction" };
+      }
+
+      if (typeof compactionWantedAt === "number") {
+        return { when: now + COMPACTION_REARM_DELAY_MS, reason: "compaction" };
+      }
+    } catch (e) {
+      log.warn("sched:read-compaction-state-failed", { error: String(e) });
     }
-  } catch (e) {
-    log.warn("sched:read-unpack-state-failed", { error: String(e) });
-    // Continue to check hydration/idle
-  }
+  } else {
+    // 1) Unpack has highest priority
+    try {
+      const [unpackWork, unpackNext] = await Promise.all([
+        store.get("unpackWork"),
+        store.get("unpackNext"),
+      ]);
+      if (unpackWork || unpackNext) {
+        return { when: now + cfg.unpackDelayMs, reason: "unpack" };
+      }
+    } catch (e) {
+      log.warn("sched:read-unpack-state-failed", { error: String(e) });
+      // Continue to check hydration/idle
+    }
 
-  // 2) Hydration next
-  try {
-    const [hydrWork, hydrQueue] = await Promise.all([
-      store.get("hydrationWork"),
-      store.get("hydrationQueue"),
-    ]);
-    const hasQueue = Array.isArray(hydrQueue) ? hydrQueue.length > 0 : !!hydrQueue;
+    // 2) Hydration next
+    try {
+      const [hydrWork, hydrQueue] = await Promise.all([
+        store.get("hydrationWork"),
+        store.get("hydrationQueue"),
+      ]);
+      const hasQueue = Array.isArray(hydrQueue) ? hydrQueue.length > 0 : !!hydrQueue;
 
-    // Hydration scheduling:
-    // - If stage is 'error': terminal, require manual intervention; do not auto-schedule hydration
-    // - Else if nextRetryAt is set in error: schedule exactly at that time (fixed interval)
-    // - Else: schedule soon using unpackDelayMs as slice cadence
-    if (hydrWork) {
-      if (hydrWork.stage === "error") {
-        const fatal = !!hydrWork.error?.fatal;
-        log.warn(fatal ? "sched:hydration-fatal-error" : "sched:hydration-terminal-error", {
-          message: hydrWork.error?.message,
-        });
-        // Do not schedule hydration automatically; continue to idle/maintenance planning
-      } else {
-        const nextRetryAt = hydrWork.error?.nextRetryAt;
-        if (typeof nextRetryAt === "number" && nextRetryAt > now) {
-          return { when: nextRetryAt, reason: "hydration" };
+      // Hydration scheduling:
+      // - If stage is 'error': terminal, require manual intervention; do not auto-schedule hydration
+      // - Else if nextRetryAt is set in error: schedule exactly at that time (fixed interval)
+      // - Else: schedule soon using unpackDelayMs as slice cadence
+      if (hydrWork) {
+        if (hydrWork.stage === "error") {
+          const fatal = !!hydrWork.error?.fatal;
+          log.warn(fatal ? "sched:hydration-fatal-error" : "sched:hydration-terminal-error", {
+            message: hydrWork.error?.message,
+          });
+          // Do not schedule hydration automatically; continue to idle/maintenance planning
+        } else {
+          const nextRetryAt = hydrWork.error?.nextRetryAt;
+          if (typeof nextRetryAt === "number" && nextRetryAt > now) {
+            return { when: nextRetryAt, reason: "hydration" };
+          }
+          // Work in progress or immediate retry allowed
+          return { when: now + cfg.unpackDelayMs, reason: "hydration" };
         }
-        // Work in progress or immediate retry allowed
+      } else if (hasQueue) {
+        // Queue has work but no active work
         return { when: now + cfg.unpackDelayMs, reason: "hydration" };
       }
-    } else if (hasQueue) {
-      // Queue has work but no active work
-      return { when: now + cfg.unpackDelayMs, reason: "hydration" };
+    } catch (e) {
+      log.warn("sched:read-hydration-state-failed", { error: String(e) });
+      // Continue to idle/maintenance fallback
     }
-  } catch (e) {
-    log.warn("sched:read-hydration-state-failed", { error: String(e) });
-    // Continue to idle/maintenance fallback
   }
 
   // 3) Idle / Maintenance planning
@@ -134,7 +168,7 @@ export async function ensureScheduled(
 ): Promise<{
   scheduled: boolean;
   when?: number;
-  reason?: "unpack" | "hydration" | "idle" | "maint";
+  reason?: "unpack" | "hydration" | "compaction" | "idle" | "maint";
 }> {
   const log = createLogger(env.LOG_LEVEL, { service: "Scheduler", doId: state.id.toString() });
   try {

@@ -31,15 +31,25 @@ import { getPackLatest, getPacks, getPackOids, getPackOidsBatch } from "./packs.
 import {
   abortCompactionLease,
   abortReceiveLease,
-  beginCompactionLease,
+  type BeginCompactionResult,
+  beginCompactionState,
   beginReceiveLease,
+  type ClearCompactionRequestResult,
+  clearCompactionRequestState,
   clearExpiredLeases,
   completeLegacyCompatBackfillState,
+  type CommitCompactionResult,
+  commitCompactionState,
   failLegacyCompatBackfillState,
   finalizeReceiveState,
   type LegacyCompatBackfillBatch,
   type LegacyCompatBackfillCursor,
+  type PreviewCompactionResult,
+  previewCompactionState,
   requestLegacyCompatBackfillState,
+  type RequestCompactionResult,
+  requestCompactionState,
+  rearmCompactionQueueFromAlarm,
   beginLegacyCompatBackfillState,
   storeLegacyCompatBatchState,
   getActivePackCatalogSnapshot,
@@ -69,11 +79,6 @@ import {
   touchAndMaybeSchedule,
   type RepoDOAccessContext,
 } from "./repoDO/access.ts";
-import {
-  clearCompactionRequestState,
-  previewCompactionState,
-  requestCompactionState,
-} from "./repoDO/compaction.ts";
 import { handleReceiveRequest } from "./repoDO/receive.ts";
 import { handleHydrationAlarmWork } from "./repoDO/hydration.ts";
 import { seedMinimalRepoState } from "./repoDO/seeding.ts";
@@ -104,10 +109,11 @@ import { seedMinimalRepoState } from "./repoDO/seeding.ts";
  *   That compatibility path remains in place for `legacy` and `shadow-read` repos.
  *
  * Maintenance & Background Work
- * - `alarm()` combines three duties:
- *   1) Unpack work: Process pending legacy pack objects in time-limited chunks.
- *   2) Idle cleanup: If a repo looks empty and idle long enough, purge DO storage and its R2 prefix.
- *   3) Pack maintenance: Periodically prune old pack files in R2 and their metadata in DO.
+ * - `alarm()` is mode-aware:
+ *   1) `streaming` repos use it only for lightweight lease cleanup, compaction queue re-arm,
+ *      and idle cleanup.
+ *   2) `legacy` and `shadow-read` repos continue to use it for legacy unpack and hydration work,
+ *      plus idle cleanup and periodic maintenance.
  * - Listing/sweeping uses helpers from `keys.ts` to avoid path mismatches.
  */
 export class RepoDurableObject extends DurableObject {
@@ -146,12 +152,21 @@ export class RepoDurableObject extends DurableObject {
 
     await clearExpiredLeases(this.ctx, this.logger);
 
-    if (await handleUnpackWork(this.ctx, this.env, this.prefix(), this.logger)) {
-      return;
-    }
+    const currentMode = await getRepoStorageModeValue(this.ctx);
+    if (currentMode === "streaming") {
+      if (
+        await rearmCompactionQueueFromAlarm({ ctx: this.ctx, env: this.env, logger: this.logger })
+      ) {
+        return;
+      }
+    } else {
+      if (await handleUnpackWork(this.ctx, this.env, this.prefix(), this.logger)) {
+        return;
+      }
 
-    if (await this.handleHydrationWork(store)) {
-      return;
+      if (await this.handleHydrationWork(store)) {
+        return;
+      }
     }
 
     await handleIdleAndMaintenance(this.ctx, this.env, this.logger);
@@ -304,6 +319,7 @@ export class RepoDurableObject extends DurableObject {
     await this.ensureAccessAndAlarm();
     return await finalizeReceiveState({
       ctx: this.ctx,
+      env: this.env,
       token: args.token,
       commands: args.commands,
       stagedPack: args.stagedPack,
@@ -311,14 +327,44 @@ export class RepoDurableObject extends DurableObject {
     });
   }
 
-  public async beginCompaction() {
+  public async beginCompaction(): Promise<BeginCompactionResult> {
     await this.ensureAccessAndAlarm();
-    return await beginCompactionLease(this.ctx, this.env, this.prefix(), this.logger);
+    return await beginCompactionState({
+      ctx: this.ctx,
+      env: this.env,
+      prefix: this.prefix(),
+      logger: this.logger,
+    });
   }
 
   public async abortCompaction(token: string): Promise<boolean> {
     await this.ensureAccessAndAlarm();
     return await abortCompactionLease(this.ctx, token);
+  }
+
+  public async commitCompaction(args: {
+    token: string;
+    sourcePacks: PackCatalogRow[];
+    targetTier: number;
+    packsetVersion: number;
+    stagedPack: {
+      packKey: string;
+      packBytes: number;
+      idxBytes: number;
+      objectCount: number;
+    };
+  }): Promise<CommitCompactionResult> {
+    await this.ensureAccessAndAlarm();
+    return await commitCompactionState({
+      ctx: this.ctx,
+      env: this.env,
+      token: args.token,
+      sourcePacks: args.sourcePacks,
+      targetTier: args.targetTier,
+      packsetVersion: args.packsetVersion,
+      stagedPack: args.stagedPack,
+      logger: this.logger,
+    });
   }
 
   public async requestLegacyCompatBackfill() {
@@ -385,14 +431,7 @@ export class RepoDurableObject extends DurableObject {
     return await getUnpackProgress(this.ctx);
   }
 
-  public async previewCompaction(): Promise<{
-    action: "preview";
-    message: string;
-    queued: boolean;
-    wantedAt?: number;
-    activeCatalog: PackCatalogRow[];
-    packCatalogVersion: number;
-  }> {
+  public async previewCompaction(): Promise<PreviewCompactionResult> {
     await this.ensureAccessAndAlarm();
     return await previewCompactionState({
       ctx: this.ctx,
@@ -402,14 +441,7 @@ export class RepoDurableObject extends DurableObject {
     });
   }
 
-  public async requestCompaction(): Promise<{
-    action: "queued";
-    message: string;
-    queued: true;
-    wantedAt: number;
-    activeCatalog: PackCatalogRow[];
-    packCatalogVersion: number;
-  }> {
+  public async requestCompaction(): Promise<RequestCompactionResult> {
     await this.ensureAccessAndAlarm();
     return await requestCompactionState({
       ctx: this.ctx,
@@ -419,11 +451,7 @@ export class RepoDurableObject extends DurableObject {
     });
   }
 
-  public async clearCompactionRequest(): Promise<{
-    action: "cleared";
-    cleared: boolean;
-    message: string;
-  }> {
+  public async clearCompactionRequest(): Promise<ClearCompactionRequestResult> {
     await this.ensureAccessAndAlarm();
     return await clearCompactionRequestState({
       ctx: this.ctx,

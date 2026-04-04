@@ -5,7 +5,6 @@ import type {
 } from "@/do/repo/catalog/index.ts";
 import type { RepoDurableObject } from "@/do/repo/repoDO.ts";
 import type { Logger } from "@/common/logger.ts";
-import type { LegacyCompatBackfillQueueMessage } from "./queue.ts";
 
 import { createLogger, getRepoStub } from "@/common/index.ts";
 import { encodeGitObject } from "@/git/core/objects.ts";
@@ -22,6 +21,13 @@ const BACKFILL_BATCH_OBJECT_LIMIT = 128;
 const BACKFILL_BATCH_BYTES_LIMIT = 4 * 1024 * 1024;
 const BACKFILL_SUBREQUEST_BUDGET = 5_000;
 const BACKFILL_SUBREQUEST_FLOOR = 64;
+
+export type LegacyCompatBackfillQueueMessage = {
+  kind: "legacy-backfill";
+  repoId: string;
+  jobId: string;
+  targetPacksetVersion: number;
+};
 
 type RepoMaintenanceMessage<Body> = MessageBatch<Body>["messages"][number];
 
@@ -72,11 +78,12 @@ async function flushLegacyCompatBatch(args: {
 }
 
 export async function handleLegacyCompatBackfillMessage(
-  message: RepoMaintenanceMessage<LegacyCompatBackfillQueueMessage>,
+  message: Omit<RepoMaintenanceMessage<LegacyCompatBackfillQueueMessage>, "body">,
+  body: LegacyCompatBackfillQueueMessage,
   env: Env,
   ctx: ExecutionContext
 ): Promise<void> {
-  const repoId = message.body.repoId;
+  const repoId = body.repoId;
   const stub = getRepoStub(env, repoId);
   const log = createLogger(env.LOG_LEVEL, {
     service: "LegacyCompatBackfill",
@@ -98,10 +105,7 @@ export async function handleLegacyCompatBackfillMessage(
 
   try {
     countSubrequest(cacheCtx);
-    const begin = await stub.beginLegacyCompatBackfill(
-      message.body.jobId,
-      message.body.targetPacksetVersion
-    );
+    const begin = await stub.beginLegacyCompatBackfill(body.jobId, body.targetPacksetVersion);
     if (begin.status !== "ok") {
       log.info("legacy-compat:skip", {
         status: begin.status,
@@ -180,7 +184,7 @@ export async function handleLegacyCompatBackfillMessage(
 
           const flushResult = await flushLegacyCompatBatch({
             stub,
-            message: message.body,
+            message: body,
             batch: stagedBatch,
             nextProgress: nextCursor,
             cacheCtx,
@@ -205,7 +209,7 @@ export async function handleLegacyCompatBackfillMessage(
 
     const flushResult = await flushLegacyCompatBatch({
       stub,
-      message: message.body,
+      message: body,
       batch: stagedBatch,
       nextProgress: nextCursor,
       cacheCtx,
@@ -217,7 +221,7 @@ export async function handleLegacyCompatBackfillMessage(
     }
 
     if (needsContinuation) {
-      await env.REPO_MAINT_QUEUE.send(message.body);
+      await env.REPO_MAINT_QUEUE.send(body);
       log.info("legacy-compat:requeue", {
         nextPackIndex: nextCursor.packIndex,
         nextObjectIndex: nextCursor.objectIndex,
@@ -228,10 +232,7 @@ export async function handleLegacyCompatBackfillMessage(
     }
 
     countSubrequest(cacheCtx);
-    const complete = await stub.completeLegacyCompatBackfill(
-      message.body.jobId,
-      message.body.targetPacksetVersion
-    );
+    const complete = await stub.completeLegacyCompatBackfill(body.jobId, body.targetPacksetVersion);
     if (complete.status !== "ok") {
       log.info("legacy-compat:skip", {
         status: complete.status,
@@ -248,11 +249,7 @@ export async function handleLegacyCompatBackfillMessage(
   } catch (error) {
     log.error("legacy-compat:error", { error: String(error) });
     countSubrequest(cacheCtx);
-    await stub.failLegacyCompatBackfill(
-      message.body.jobId,
-      message.body.targetPacksetVersion,
-      String(error)
-    );
+    await stub.failLegacyCompatBackfill(body.jobId, body.targetPacksetVersion, String(error));
     message.ack();
   }
 }

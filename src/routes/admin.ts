@@ -1,5 +1,5 @@
 import { AutoRouter } from "itty-router";
-import { getRepoStub, isValidOid, json, unauthorizedAdminBasic } from "@/common";
+import { createLogger, getRepoStub, isValidOid, json, unauthorizedAdminBasic } from "@/common";
 import { repoKey } from "@/keys";
 import { verifyAuth } from "@/auth";
 import { listReposForOwner, addRepoToOwner, removeRepoFromOwner } from "@/registry";
@@ -42,17 +42,50 @@ function isStorageModePayload(value: JsonValue | null): value is StorageModePayl
 }
 
 export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
-  async function handleCompatCompactionPost(request: AdminRouteRequest, env: Env) {
+  async function handleCompatCompactionPost(
+    request: AdminRouteRequest,
+    env: Env,
+    ctx: ExecutionContext
+  ) {
     const { owner, repo } = request.params;
     if (!(await verifyAuth(env, owner, request, true))) {
       return unauthorizedAdminBasic();
     }
     const body = await safeParseJsonRequest(request);
     const dryRun = !isJsonObject(body) || body.dryRun !== false;
-    const stub = getRepoStub(env, repoKey(owner, repo));
+    const repoId = repoKey(owner, repo);
+    const stub = getRepoStub(env, repoId);
+    const log = createLogger(env.LOG_LEVEL, {
+      service: "AdminRoutes",
+      repoId,
+    });
     try {
       const res = dryRun ? await stub.previewCompaction() : await stub.requestCompaction();
-      return json(res, dryRun ? 200 : 202, { "Cache-Control": "no-cache" });
+      if (!dryRun && res.status === "queued" && res.shouldEnqueue) {
+        const queueTask = env.REPO_MAINT_QUEUE.send({
+          kind: "compaction",
+          doId: stub.id.toString(),
+          repoId,
+        })
+          .then(() => {
+            log.info("admin:compaction-enqueue-requested", {
+              doId: stub.id.toString(),
+            });
+          })
+          .catch((error) => {
+            // The DO has already recorded `compactionWantedAt`, so queue failure
+            // delays background work but must not turn an accepted request into
+            // a hard HTTP failure.
+            log.warn("admin:compaction-enqueue-failed", {
+              doId: stub.id.toString(),
+              error: String(error),
+            });
+          });
+        ctx.waitUntil(queueTask);
+      }
+
+      const status = dryRun || res.status !== "queued" ? 200 : 202;
+      return json(res, status, { "Cache-Control": "no-cache" });
     } catch (e) {
       return json({ error: String(e) }, 500);
     }

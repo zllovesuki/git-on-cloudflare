@@ -4,10 +4,38 @@ import type { CacheContext } from "@/cache";
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
 
+import { getDb, upsertPackCatalogRow } from "@/do/repo/db/index.ts";
 import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
 import { readLooseObjectRaw } from "@/git/operations/read/objects.ts";
 import { callStubWithRetry, runDOWithRetry, uniqueRepoId } from "./util/test-helpers.ts";
 import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first.ts";
+
+async function seedCompatCompactionOverflow(repoId: string): Promise<void> {
+  const getStub = () =>
+    env.REPO_DO.get(env.REPO_DO.idFromName(repoId)) as DurableObjectStub<RepoDurableObject>;
+
+  await runDOWithRetry(getStub, async (_instance, state) => {
+    const db = getDb(state.storage);
+    const now = Date.now();
+
+    for (let index = 0; index < 5; index++) {
+      const seq = index + 2;
+      await upsertPackCatalogRow(db, {
+        packKey: `do/${state.id.toString()}/objects/pack/pack-compat-preview-${seq}.pack`,
+        kind: "legacy",
+        state: "active",
+        tier: 0,
+        seqLo: seq,
+        seqHi: seq,
+        objectCount: 1,
+        packBytes: 1,
+        idxBytes: 1,
+        createdAt: now + index,
+        supersededBy: null,
+      });
+    }
+  });
+}
 
 describe("pack-first read path storage mode", () => {
   it("treats compact and hydrate admin routes as preview and queue aliases", async () => {
@@ -15,8 +43,9 @@ describe("pack-first read path storage mode", () => {
     const repo = uniqueRepoId("compaction-admin");
     const repoId = `${owner}/${repo}`;
     await seedPackFirstRepo(repoId);
+    await seedCompatCompactionOverflow(repoId);
 
-    const previewResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/compact`, {
+    const previewResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/hydrate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -24,12 +53,14 @@ describe("pack-first read path storage mode", () => {
     expect(previewResponse.status).toBe(200);
     const previewJson = (await previewResponse.json()) as {
       action?: string;
-      queued?: boolean;
+      status?: string;
+      plan?: { sourcePacks?: unknown[] };
       message?: string;
     };
     expect(previewJson.action).toBe("preview");
-    expect(previewJson.queued).toBe(false);
-    expect(previewJson.message).toContain("No new request was recorded");
+    expect(previewJson.status).toBe("ok");
+    expect(previewJson.plan?.sourcePacks?.length).toBe(4);
+    expect(previewJson.message).toContain("switches to streaming mode");
 
     const previewStateResponse = await SELF.fetch(
       `https://example.com/${owner}/${repo}/admin/debug-state`
@@ -45,18 +76,15 @@ describe("pack-first read path storage mode", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dryRun: false }),
     });
-    expect(queueResponse.status).toBe(202);
+    expect(queueResponse.status).toBe(200);
     const queueJson = (await queueResponse.json()) as {
-      action?: string;
-      queued?: boolean;
-      wantedAt?: number;
+      status?: string;
+      shouldEnqueue?: boolean;
       message?: string;
     };
-    expect(queueJson.action).toBe("queued");
-    expect(queueJson.queued).toBe(true);
-    expect(typeof queueJson.wantedAt).toBe("number");
-    expect(queueJson.message).toContain("Recorded");
-    expect(queueJson.message).toContain("Background compaction");
+    expect(queueJson.status).toBe("ineligible");
+    expect(queueJson.shouldEnqueue).toBe(false);
+    expect(queueJson.message).toContain("only be requested");
 
     const queuedStateResponse = await SELF.fetch(
       `https://example.com/${owner}/${repo}/admin/debug-state`
@@ -65,8 +93,14 @@ describe("pack-first read path storage mode", () => {
     const queuedState = (await queuedStateResponse.json()) as {
       compaction?: { queued?: boolean; wantedAt?: number };
     };
-    expect(queuedState.compaction?.queued).toBe(true);
-    expect(typeof queuedState.compaction?.wantedAt).toBe("number");
+    expect(queuedState.compaction?.queued).toBe(false);
+
+    const getStub = () =>
+      env.REPO_DO.get(env.REPO_DO.idFromName(repoId)) as DurableObjectStub<RepoDurableObject>;
+    await runDOWithRetry(getStub, async (_instance, state) => {
+      const store = asTypedStorage<RepoStateSchema>(state.storage);
+      await store.put("compactionWantedAt", Date.now());
+    });
 
     const clearResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/hydrate`, {
       method: "DELETE",

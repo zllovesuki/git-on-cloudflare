@@ -179,6 +179,11 @@ async function performMaintenance(
   logger?: Logger
 ): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const repoStorageMode = (await store.get("repoStorageMode")) || "legacy";
+  if (repoStorageMode === "streaming") {
+    logger?.debug("maintenance:skipped-streaming-mode", {});
+    return;
+  }
   try {
     // Deletes older packs beyond the keep-window from both DO metadata and R2,
     // and keeps `lastPackKey/lastPackOids` consistent

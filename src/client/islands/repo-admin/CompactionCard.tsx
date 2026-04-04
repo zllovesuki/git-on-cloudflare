@@ -4,7 +4,7 @@ import { Card } from "@/client/components/ui/card";
 import { JsonResult } from "./JsonResult";
 import type { AdminState, CompactionData } from "./types";
 
-export type HydrationCardProps = {
+export type CompactionCardProps = {
   compactionData?: CompactionData;
   compactionStartedAt?: string | null;
   compactionStatus: string;
@@ -15,7 +15,7 @@ export type HydrationCardProps = {
   compactionResult: unknown;
 };
 
-export function HydrationCard({
+export function CompactionCard({
   compactionData,
   compactionStartedAt,
   compactionStatus,
@@ -24,17 +24,21 @@ export function HydrationCard({
   startCompaction,
   clearCompaction,
   compactionResult,
-}: HydrationCardProps) {
+}: CompactionCardProps) {
   const receiveStartedAt = state.receiveLease
     ? new Date(state.receiveLease.createdAt).toLocaleString()
+    : null;
+  const compactionAvailable = state.repoStorageMode === "streaming";
+  const queuedCompactionAt = compactionData?.wantedAt
+    ? new Date(compactionData.wantedAt).toLocaleString()
     : null;
 
   return (
     <Card>
-      <h2 className="mb-4 text-xl font-semibold">Repository Activity</h2>
+      <h2 className="mb-4 text-xl font-semibold">Pack Compaction</h2>
       <p className="mb-4 text-zinc-600 dark:text-zinc-400">
-        Receive and compaction leases are the live repository signals on this page. The controls
-        below preview or record compaction requests; background compaction is not wired here yet.
+        Receive and compaction leases are the live background activity signals for this repository.
+        Automatic compaction runs only while storage mode is set to streaming.
       </p>
 
       {state.receiveLease ? (
@@ -115,9 +119,9 @@ export function HydrationCard({
 
       <div className="mt-4 space-y-4">
         <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/40 dark:text-zinc-300">
-          The compaction endpoints are compatibility controls during the streaming-push rollout.
-          Pack-catalog state and active leases are the source of truth for repository status until
-          background compaction work is wired in.
+          {compactionAvailable
+            ? "Compaction requests queue real background work. The active pack catalog and compaction lease are the source of truth for repository state."
+            : "Compaction preview remains available in compatibility modes, but background compaction only runs after the repository switches to streaming mode."}
         </div>
         <div className="flex flex-wrap gap-3">
           <Button
@@ -133,7 +137,10 @@ export function HydrationCard({
           <Button
             type="button"
             onClick={() => void startCompaction(false)}
-            disabled={pending["compaction-start"]}
+            disabled={!compactionAvailable || pending["compaction-start"]}
+            title={
+              compactionAvailable ? undefined : "Enable streaming mode before queueing compaction"
+            }
           >
             <Play className="mr-2 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
             <span className="label">
@@ -144,7 +151,9 @@ export function HydrationCard({
             variant="secondary"
             type="button"
             onClick={() => void clearCompaction()}
-            disabled={pending["compaction-clear"]}
+            disabled={
+              pending["compaction-clear"] || (!compactionData?.queued && !compactionData?.running)
+            }
           >
             <Trash2 className="mr-2 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
             <span className="label">
@@ -152,6 +161,11 @@ export function HydrationCard({
             </span>
           </Button>
         </div>
+        {queuedCompactionAt ? (
+          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+            Latest request recorded at {queuedCompactionAt}.
+          </div>
+        ) : null}
         {compactionResult ? <JsonResult data={compactionResult} /> : null}
       </div>
     </Card>

@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { env, SELF } from "cloudflare:test";
+import { createExecutionContext, env, SELF } from "cloudflare:test";
 
 import { handleRepoMaintenanceQueue } from "@/maintenance/queue.ts";
 import { deleteLooseObjectCopies, uniqueRepoId } from "./util/test-helpers.ts";
 import { seedPackFirstRepo } from "./util/pack-first.ts";
 import { getRepoStub } from "@/common/index.ts";
 import { promoteToStreaming, pushStreamingUpdate } from "./util/streaming-helpers.ts";
+import { runQueueMessage } from "./util/queue.ts";
 
 type BackfillQueuePayload = {
   status?: string;
@@ -14,47 +15,18 @@ type BackfillQueuePayload = {
   shouldEnqueue?: boolean;
 };
 
-function makeExecutionContext(): ExecutionContext {
-  return {
-    props: undefined,
-    waitUntil(_promise: Promise<unknown>) {},
-    passThroughOnException() {},
-  };
-}
-
 async function queueLegacyCompatBackfill(repoId: string, payload: BackfillQueuePayload) {
   if (payload.status !== "queued" || !payload.jobId || !payload.targetPacksetVersion) {
     throw new Error("expected queued rollback backfill payload");
   }
 
-  let acked = false;
-  await handleRepoMaintenanceQueue(
-    {
-      queue: "git-on-cloudflare-repo-maint",
-      messages: [
-        {
-          id: "backfill-1",
-          timestamp: new Date(),
-          body: {
-            kind: "legacy-backfill",
-            repoId,
-            jobId: payload.jobId,
-            targetPacksetVersion: payload.targetPacksetVersion,
-          },
-          attempts: 1,
-          retry() {},
-          ack() {
-            acked = true;
-          },
-        },
-      ],
-      retryAll() {},
-      ackAll() {},
-    },
-    env,
-    makeExecutionContext()
-  );
-  expect(acked).toBe(true);
+  const result = await runQueueMessage({
+    kind: "legacy-backfill",
+    repoId,
+    jobId: payload.jobId,
+    targetPacksetVersion: payload.targetPacksetVersion,
+  });
+  expect(result.acked).toBe(true);
 }
 
 describe("streaming receive rollback preparation", () => {
@@ -286,7 +258,7 @@ describe("streaming receive rollback preparation", () => {
         ackAll() {},
       },
       fakeEnv,
-      makeExecutionContext()
+      createExecutionContext()
     );
 
     expect(acked).toBe(true);

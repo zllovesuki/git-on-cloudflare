@@ -370,6 +370,18 @@ export async function executeReceivePipeline(
 
     if (finalize.shouldQueueCompaction) {
       args.log.info("receive:compaction-requested", { repoId: args.repoId });
+      args.ctx.waitUntil(
+        args.env.REPO_MAINT_QUEUE.send({
+          kind: "compaction",
+          doId: args.stub.id.toString(),
+          repoId: args.repoId,
+        }).catch((error) => {
+          args.log.warn("receive:compaction-enqueue-failed", {
+            repoId: args.repoId,
+            error: String(error),
+          });
+        })
+      );
     }
 
     return buildReceiveResult({

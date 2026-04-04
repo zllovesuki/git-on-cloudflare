@@ -8,7 +8,7 @@ export type { RepoAdminProps } from "./types";
 import type { RepoAdminProps } from "./types";
 import { useRepoAdminActions } from "./useRepoAdminActions";
 import { RepoOverviewCard } from "./RepoOverviewCard";
-import { HydrationCard } from "./HydrationCard";
+import { CompactionCard } from "./CompactionCard";
 import { StorageModeCard } from "./StorageModeCard";
 import { PackFilesCard } from "./PackFilesCard";
 import { RefsCard } from "./RefsCard";
@@ -90,7 +90,7 @@ export function RepoAdminIsland(props: RepoAdminProps) {
         requestLegacyCompatBackfill={requestLegacyCompatBackfill}
       />
 
-      <HydrationCard
+      <CompactionCard
         compactionData={compactionData}
         compactionStartedAt={compactionStartedAt}
         compactionStatus={compactionStatus}

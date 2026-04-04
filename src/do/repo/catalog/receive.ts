@@ -1,6 +1,6 @@
 import type { Logger } from "@/common/logger.ts";
 import type { PackCatalogRow } from "../db/schema.ts";
-import type { RepoStateSchema, RepoStorageMode, TypedStorage } from "../repoState.ts";
+import type { RepoStateSchema, RepoStorageMode } from "../repoState.ts";
 
 import { asTypedStorage } from "../repoState.ts";
 import {
@@ -11,7 +11,13 @@ import {
   validateReceiveCommands,
 } from "@/git/operations/validation.ts";
 import { getDb, listActivePackCatalog, upsertPackCatalogRow } from "../db/index.ts";
-import { DEFAULT_HEAD, bumpPacksetVersion, ensureRepoMetadataDefaults } from "./shared.ts";
+import {
+  DEFAULT_HEAD,
+  bumpPacksetVersion,
+  ensureRepoMetadataDefaults,
+  mirrorLegacyPackKeys,
+} from "./shared.ts";
+import { catalogNeedsCompaction, scheduleCompactionWake } from "./compaction/plan.ts";
 
 export type FinalizeReceiveResult =
   | {
@@ -34,8 +40,6 @@ export type FinalizeReceiveResult =
       currentMode: RepoStorageMode;
     };
 
-const COMPACTION_FAN_IN = 4;
-
 function resolveHeadAfterReceive(args: {
   storedHead:
     | {
@@ -54,33 +58,9 @@ function resolveHeadAfterReceive(args: {
   return { target, unborn: true } as const;
 }
 
-function catalogNeedsCompaction(activeCatalog: PackCatalogRow[]): boolean {
-  const counts = new Map<number, number>();
-  for (const pack of activeCatalog) {
-    counts.set(pack.tier, (counts.get(pack.tier) || 0) + 1);
-  }
-  for (const count of counts.values()) {
-    if (count > COMPACTION_FAN_IN) return true;
-  }
-  return false;
-}
-
-async function mirrorLegacyPackKeys(
-  store: TypedStorage<RepoStateSchema>,
-  activeCatalog: PackCatalogRow[]
-): Promise<void> {
-  const packList = activeCatalog.map((row) => row.packKey);
-  await store.put("packList", packList);
-  const nextLastPackKey = packList[0];
-  if (nextLastPackKey) {
-    await store.put("lastPackKey", nextLastPackKey);
-    return;
-  }
-  await store.delete("lastPackKey");
-}
-
 export async function finalizeReceiveState(args: {
   ctx: DurableObjectState;
+  env: Env;
   token: string;
   commands: ReceiveCommand[];
   stagedPack?:
@@ -172,6 +152,7 @@ export async function finalizeReceiveState(args: {
     shouldQueueCompaction = catalogNeedsCompaction(activeCatalog);
     if (shouldQueueCompaction) {
       await store.put("compactionWantedAt", Date.now());
+      await scheduleCompactionWake(args.ctx, args.env);
     }
   }
 

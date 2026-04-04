@@ -1,4 +1,5 @@
 export * from "./activity.ts";
+export * from "./compaction/index.ts";
 export * from "./legacyCompat.ts";
 export * from "./leases.ts";
 export * from "./receive.ts";

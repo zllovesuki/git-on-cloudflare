@@ -4,9 +4,7 @@ import { asTypedStorage } from "../repoState.ts";
 import type { RepoLease, RepoStateSchema } from "../repoState.ts";
 import { getActivePackCatalogSnapshot } from "./state.ts";
 import {
-  BeginCompactionResult,
   BeginReceiveResult,
-  COMPACT_LEASE_TTL_MS,
   DEFAULT_HEAD,
   LEASE_RETRY_AFTER_SECONDS,
   ensureRepoMetadataDefaults,
@@ -75,43 +73,6 @@ export async function abortReceiveLease(ctx: DurableObjectState, token: string):
   if (!existing || existing.token !== token) return false;
   await store.delete("receiveLease");
   return true;
-}
-
-export async function beginCompactionLease(
-  ctx: DurableObjectState,
-  env: Env,
-  prefix: string,
-  logger?: Logger
-): Promise<BeginCompactionResult> {
-  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-  await clearExpiredLeases(ctx, logger);
-
-  const receiveLease = await store.get("receiveLease");
-  if (receiveLease) {
-    return { ok: false, retryAfter: LEASE_RETRY_AFTER_SECONDS, reason: "receive-active" };
-  }
-
-  const compactLease = await store.get("compactLease");
-  if (compactLease) {
-    return { ok: false, retryAfter: LEASE_RETRY_AFTER_SECONDS, reason: "compact-active" };
-  }
-
-  const now = Date.now();
-  const lease: RepoLease = {
-    token: crypto.randomUUID(),
-    createdAt: now,
-    expiresAt: now + COMPACT_LEASE_TTL_MS,
-  };
-  await store.put("compactLease", lease);
-
-  const activeCatalog = await getActivePackCatalogSnapshot(ctx, env, prefix, logger);
-  return {
-    ok: true,
-    lease,
-    packsetVersion: (await store.get("packsetVersion")) || 0,
-    nextPackSeq: (await store.get("nextPackSeq")) || 1,
-    activeCatalog,
-  };
 }
 
 export async function abortCompactionLease(
