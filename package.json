@@ -40,7 +40,6 @@
   "dependencies": {
     "drizzle-orm": "^0.45.1",
     "highlight.js": "^11.11.1",
-    "isomorphic-git": "^1.33.1",
     "itty-router": "^5.0.22",
     "lucide-react": "^1.7.0",
     "marked": "^17.0.4",

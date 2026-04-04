@@ -9,6 +9,15 @@ export async function getPackCatalogCount(db: DrizzleSqliteDODatabase): Promise<
   return await db.$count(packCatalog);
 }
 
+/** Count only active (non-superseded) packs — used by idle cleanup to determine repo emptiness. */
+export async function getActivePackCatalogCount(db: DrizzleSqliteDODatabase): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(packCatalog)
+    .where(eq(packCatalog.state, "active"));
+  return rows[0]?.count ?? 0;
+}
+
 export async function listPackCatalog(db: DrizzleSqliteDODatabase): Promise<PackCatalogRow[]> {
   return await db
     .select()

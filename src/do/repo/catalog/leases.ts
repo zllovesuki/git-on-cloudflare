@@ -50,7 +50,7 @@ export async function beginReceiveLease(
   await store.put("receiveLease", lease);
 
   const activeCatalog = await getActivePackCatalogSnapshot(ctx, env, prefix, logger);
-  const repoStorageMode = await ensureRepoMetadataDefaults(store);
+  await ensureRepoMetadataDefaults(store);
   const refs = (await store.get("refs")) ?? [];
   const head = (await store.get("head")) ?? DEFAULT_HEAD;
 
@@ -62,7 +62,6 @@ export async function beginReceiveLease(
     refsVersion: (await store.get("refsVersion")) || 0,
     packsetVersion: (await store.get("packsetVersion")) || 0,
     nextPackSeq: (await store.get("nextPackSeq")) || 1,
-    repoStorageMode,
     activeCatalog,
   };
 }

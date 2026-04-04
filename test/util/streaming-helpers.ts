@@ -6,13 +6,12 @@ import { encodeGitObject } from "@/git/core/objects.ts";
 import { buildPack } from "./git-pack.ts";
 import { buildTreePayload } from "./packed-repo.ts";
 
-export async function promoteToStreaming(owner: string, repo: string) {
-  const result = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/storage-mode`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode: "streaming" }),
-  });
-  expect(result.status).toBe(200);
+/**
+ * No-op: all repos are now implicitly streaming.
+ * Kept as a stub so existing test call-sites don't need updating.
+ */
+export async function promoteToStreaming(_owner: string, _repo: string) {
+  // Streaming is the only mode after the closure release — nothing to do.
 }
 
 export function decodeReportStatus(responseBody: Uint8Array): string[] {

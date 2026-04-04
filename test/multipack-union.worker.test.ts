@@ -1,43 +1,25 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
-import * as git from "isomorphic-git";
-import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
+import { asTypedStorage } from "@/do/repo/repoState.ts";
+import type { RepoStateSchema } from "@/do/repo/repoState.ts";
 import {
   concatChunks,
-  createMemPackFs,
   delimPkt,
+  encodeGitObject,
   encodeObjHeader,
   flushPkt,
   pktLine,
   decodePktLines,
 } from "@/git";
-import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
-import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
-import { asBufferSource, deflate, inflate } from "@/common/index.ts";
-import { doPrefix } from "@/keys.ts";
-
-async function readLoose(
-  getStub: () => DurableObjectStub<RepoDurableObject>,
-  oid: string
-): Promise<{ type: string; payload: Uint8Array }> {
-  const batch = await callStubWithRetry(getStub, (s) => s.getObjectsBatch([oid]));
-  const obj = batch.get(oid);
-  if (!obj) throw new Error("missing loose " + oid);
-  const z = obj instanceof Uint8Array ? obj : new Uint8Array(obj);
-  const raw = await inflate(z);
-  // parse header: "type size\0"
-  let p = 0;
-  while (p < raw.length && raw[p] !== 0x20) p++;
-  const type = new TextDecoder().decode(raw.subarray(0, p));
-  let nul = p + 1;
-  while (nul < raw.length && raw[nul] !== 0x00) nul++;
-  const payload = raw.subarray(nul + 1);
-  return { type, payload };
-}
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
+import { getDb, upsertPackCatalogRow } from "@/do/repo/db/index.ts";
+import { asBufferSource, deflate } from "@/common/index.ts";
+import { doPrefix, r2PackKey } from "@/keys.ts";
+import { indexTestPack } from "./util/test-indexer.ts";
+import { bytesToHex } from "@/common/hex.ts";
 
 async function buildPack(objs: { type: string; payload: Uint8Array }[]): Promise<Uint8Array> {
-  // PACK header
   const hdr = new Uint8Array(12);
   hdr.set(new TextEncoder().encode("PACK"), 0);
   const dv = new DataView(hdr.buffer);
@@ -56,8 +38,6 @@ async function buildPack(objs: { type: string; payload: Uint8Array }[]): Promise
   out.set(sha, body.byteLength);
   return out;
 }
-
-// Use the repo-side mem fs that implements the full interface isomorphic-git expects
 
 function buildFetchBody({
   wants,
@@ -85,63 +65,66 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
   const id = env.REPO_DO.idFromName(repoId);
   const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
 
-  // Seed DO repo with a commit + empty tree as loose objects only
-  const { commitOid, treeOid } = await runDOWithRetry(
-    getStub,
-    async (instance: RepoDurableObject) => {
-      return instance.seedMinimalRepo(false); // Don't create a pack
-    }
+  // Create objects directly — no seedMinimalRepo needed
+  const treePayload = new Uint8Array(0); // empty tree
+  const { oid: treeOid } = await encodeGitObject("tree", treePayload);
+
+  const author = "You <you@example.com> 0 +0000";
+  const commitPayload = new TextEncoder().encode(
+    `tree ${treeOid}\nauthor ${author}\ncommitter ${author}\n\ninitial\n`
   );
+  const { oid: commitOid } = await encodeGitObject("commit", commitPayload);
 
-  // Read loose objects
-  const commit = await readLoose(getStub, commitOid);
-  const tree = await readLoose(getStub, treeOid);
+  // Build two packs: A(commit), B(tree) — objects split across packs
+  const packA = await buildPack([{ type: "commit", payload: commitPayload }]);
+  const packB = await buildPack([{ type: "tree", payload: treePayload }]);
 
-  // Build two packs: A(commit), B(tree)
-  const packA = await buildPack([commit]);
-  const packB = await buildPack([tree]);
-
-  // Create idx for both using isomorphic-git indexPack
-  const filesA = new Map<string, Uint8Array>();
-  const fsA = createMemPackFs(filesA);
-  await fsA.promises.writeFile("/git/objects/pack/pack-a.pack", packA);
-  await git.indexPack({ fs: fsA as any, dir: "/git", filepath: "objects/pack/pack-a.pack" } as any);
-  const idxA = filesA.get("/git/objects/pack/pack-a.idx");
-  if (!idxA) throw new Error("failed to create idxA");
-
-  const filesB = new Map<string, Uint8Array>();
-  const fsB = createMemPackFs(filesB);
-  await fsB.promises.writeFile("/git/objects/pack/pack-b.pack", packB);
-  await git.indexPack({ fs: fsB as any, dir: "/git", filepath: "objects/pack/pack-b.pack" } as any);
-  const idxB = filesB.get("/git/objects/pack/pack-b.idx");
-  if (!idxB) throw new Error("failed to create idxB");
-
-  let prefix = "";
+  // Upload packs, index with streaming indexer, register in pack_catalog
   await runDOWithRetry(getStub, async (_instance, state: DurableObjectState) => {
-    prefix = doPrefix(state.id.toString());
-  });
-
-  // Upload pack+idx to R2 under the repo prefix so catalog backfill can
-  // seed `pack_catalog` from the same R2 layout used in production.
-  const keyA = `${prefix}/objects/pack/pack-a.pack`;
-  const keyB = `${prefix}/objects/pack/pack-b.pack`;
-  await env.REPO_BUCKET.put(keyA, packA);
-  await env.REPO_BUCKET.put(keyA.replace(/\.pack$/, ".idx"), idxA);
-  await env.REPO_BUCKET.put(keyB, packB);
-  await env.REPO_BUCKET.put(keyB.replace(/\.pack$/, ".idx"), idxB);
-
-  // Register pack metadata in DO storage
-  await runDOWithRetry(getStub, async (_instance, state: DurableObjectState) => {
+    const prefix = doPrefix(state.id.toString());
     const store = asTypedStorage<RepoStateSchema>(state.storage);
-    await store.put("packList", [keyA, keyB]);
-
-    // Insert pack OIDs into SQLite via DAL
     const db = getDb(state.storage);
-    await insertPackOids(db, keyA, [commitOid]);
-    await insertPackOids(db, keyB, [treeOid]);
-  });
 
-  await callStubWithRetry(getStub, (stub) => stub.getActivePackCatalog());
+    const keyA = r2PackKey(prefix, "pack-a.pack");
+    const keyB = r2PackKey(prefix, "pack-b.pack");
+    await env.REPO_BUCKET.put(keyA, packA);
+    await env.REPO_BUCKET.put(keyB, packB);
+
+    const resolveA = await indexTestPack(env, keyA, packA.byteLength);
+    const resolveB = await indexTestPack(env, keyB, packB.byteLength);
+
+    await upsertPackCatalogRow(db, {
+      packKey: keyA,
+      kind: "receive",
+      state: "active",
+      tier: 0,
+      seqLo: 1,
+      seqHi: 1,
+      objectCount: resolveA.objectCount,
+      packBytes: packA.byteLength,
+      idxBytes: resolveA.idxBytes,
+      createdAt: Date.now(),
+      supersededBy: null,
+    });
+    await upsertPackCatalogRow(db, {
+      packKey: keyB,
+      kind: "receive",
+      state: "active",
+      tier: 0,
+      seqLo: 2,
+      seqHi: 2,
+      objectCount: resolveB.objectCount,
+      packBytes: packB.byteLength,
+      idxBytes: resolveB.idxBytes,
+      createdAt: Date.now(),
+      supersededBy: null,
+    });
+
+    await store.put("packsetVersion", 1);
+    await store.put("nextPackSeq", 3);
+    await store.put("refs", [{ name: "refs/heads/main", oid: commitOid }]);
+    await store.put("head", { target: "refs/heads/main", oid: commitOid });
+  });
 
   // Streaming v2: two-phase fetch. First negotiate (done=false)
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
@@ -184,6 +167,7 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
     }
   }
   const packOut = concatChunks(packChunks);
+
   // Basic checks on assembled pack
   const td = new TextDecoder();
   expect(td.decode(packOut.subarray(0, 4))).toBe("PACK");
@@ -191,15 +175,18 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
   expect(dv.getUint32(4, false)).toBe(2);
   expect(dv.getUint32(8, false)).toBe(2); // commit + tree
 
-  // Strong validation: index the returned pack and assert expected OIDs are present
-  const filesC = new Map<string, Uint8Array>();
-  const fsC = createMemPackFs(filesC);
-  await fsC.promises.writeFile("/git/objects/pack/resp.pack", packOut);
-  const { oids: outOids } = await git.indexPack({
-    fs: fsC as any,
-    dir: "/git",
-    filepath: "objects/pack/resp.pack",
-  } as any);
-  expect(outOids).toContain(commitOid);
-  expect(outOids).toContain(treeOid);
+  // Strong validation: upload the returned pack to R2 and index it to verify OIDs
+  const verifyKey = `verify/multipack-resp-${Date.now()}.pack`;
+  await env.REPO_BUCKET.put(verifyKey, packOut);
+  const verifyResult = await indexTestPack(env, verifyKey, packOut.byteLength);
+  expect(verifyResult.objectCount).toBe(2);
+
+  // Extract OIDs from the idx view's rawNames and check both objects are present
+  const oidSet = new Set<string>();
+  for (let i = 0; i < verifyResult.idxView.count; i++) {
+    const oidBytes = verifyResult.idxView.rawNames.subarray(i * 20, (i + 1) * 20);
+    oidSet.add(bytesToHex(oidBytes));
+  }
+  expect(oidSet.has(commitOid)).toBe(true);
+  expect(oidSet.has(treeOid)).toBe(true);
 });

@@ -5,7 +5,6 @@ import { formatSize, HttpError } from "@/web";
 import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/cache";
 import type { DebugStateSnapshot } from "@/do/repo/debug";
-import { getConfig } from "@/do/repo/repoConfig.ts";
 
 export type DebugState = DebugStateSnapshot;
 export type CompactionData = DebugState["compaction"];
@@ -97,23 +96,4 @@ export function computeCompactionStatus(compactionData: CompactionData | undefin
     compactionStatus = "Queued";
   }
   return { compactionStatus, compactionStartedAt };
-}
-
-export function computeNextMaintenance(
-  env: Env,
-  lastMaintenanceMs?: number
-): { nextMaintenanceIn?: string; nextMaintenanceAt?: string } {
-  try {
-    const cfg = getConfig(env);
-    const now = Date.now();
-    const last = typeof lastMaintenanceMs === "number" ? lastMaintenanceMs : undefined;
-    const nextAt = (last ?? now) + cfg.maintMs;
-    const clamped = nextAt <= now ? now + cfg.maintMs : nextAt;
-    return {
-      nextMaintenanceIn: formatFromNowShort(clamped - now),
-      nextMaintenanceAt: new Date(clamped).toLocaleString(),
-    };
-  } catch {
-    return {};
-  }
 }

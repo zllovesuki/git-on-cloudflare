@@ -12,9 +12,8 @@
     "skipLibCheck": true,
     "allowJs": true,
     "forceConsistentCasingInFileNames": true,
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     }
   },
   "exclude": ["node_modules"],

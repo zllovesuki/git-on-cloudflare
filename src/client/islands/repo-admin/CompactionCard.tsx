@@ -28,7 +28,6 @@ export function CompactionCard({
   const receiveStartedAt = state.receiveLease
     ? new Date(state.receiveLease.createdAt).toLocaleString()
     : null;
-  const compactionAvailable = state.repoStorageMode === "streaming";
   const queuedCompactionAt = compactionData?.wantedAt
     ? new Date(compactionData.wantedAt).toLocaleString()
     : null;
@@ -38,7 +37,7 @@ export function CompactionCard({
       <h2 className="mb-4 text-xl font-semibold">Pack Compaction</h2>
       <p className="mb-4 text-zinc-600 dark:text-zinc-400">
         Receive and compaction leases are the live background activity signals for this repository.
-        Automatic compaction runs only while storage mode is set to streaming.
+        Automatic compaction runs after packs accumulate past the compaction threshold.
       </p>
 
       {state.receiveLease ? (
@@ -119,9 +118,8 @@ export function CompactionCard({
 
       <div className="mt-4 space-y-4">
         <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/40 dark:text-zinc-300">
-          {compactionAvailable
-            ? "Compaction requests queue real background work. The active pack catalog and compaction lease are the source of truth for repository state."
-            : "Compaction preview remains available in compatibility modes, but background compaction only runs after the repository switches to streaming mode."}
+          Compaction requests queue real background work. The active pack catalog and compaction
+          lease are the source of truth for repository state.
         </div>
         <div className="flex flex-wrap gap-3">
           <Button
@@ -137,10 +135,7 @@ export function CompactionCard({
           <Button
             type="button"
             onClick={() => void startCompaction(false)}
-            disabled={!compactionAvailable || pending["compaction-start"]}
-            title={
-              compactionAvailable ? undefined : "Enable streaming mode before queueing compaction"
-            }
+            disabled={pending["compaction-start"]}
           >
             <Play className="mr-2 inline h-4 w-4 align-[-2px]" aria-hidden="true" />
             <span className="label">

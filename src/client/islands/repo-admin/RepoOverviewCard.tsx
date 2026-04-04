@@ -10,8 +10,6 @@ export type RepoOverviewCardProps = {
   packCount: number;
   supersededPackCount: number;
   compactionStatus: string;
-  nextMaintenanceIn?: string;
-  nextMaintenanceAt?: string;
   state: AdminState;
   head?: { target?: string; unborn?: boolean };
   branchCount: number;
@@ -23,8 +21,6 @@ export function RepoOverviewCard({
   packCount,
   supersededPackCount,
   compactionStatus,
-  nextMaintenanceIn,
-  nextMaintenanceAt,
   state,
   head,
   branchCount,
@@ -32,7 +28,6 @@ export function RepoOverviewCard({
 }: RepoOverviewCardProps) {
   const [copiedDoId, setCopiedDoId] = useState(false);
   const activePackCount = Array.isArray(state.activePacks) ? state.activePacks.length : packCount;
-  const storageModeLabel = state.repoStorageMode === "streaming" ? "streaming" : "legacy";
 
   async function copyDoId(doId: string) {
     try {
@@ -63,18 +58,6 @@ export function RepoOverviewCard({
             {supersededPackCount > 0 ? (
               <span className="ml-1 text-xs text-zinc-500">({supersededPackCount} superseded)</span>
             ) : null}
-          </div>
-        </div>
-        <div>
-          <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Next Maintenance
-          </div>
-          <div className="font-mono text-sm">
-            {nextMaintenanceIn ? (
-              <span title={nextMaintenanceAt || ""}>{nextMaintenanceIn}</span>
-            ) : (
-              <span className="text-zinc-500">n/a</span>
-            )}
           </div>
         </div>
         {state?.meta?.doId ? (
@@ -119,12 +102,6 @@ export function RepoOverviewCard({
             <div className="font-mono text-sm">{formatSampleBytes(state.dbSizeBytes)}</div>
           </div>
         ) : null}
-        <div>
-          <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Storage Mode
-          </div>
-          <div className="font-mono text-sm">{storageModeLabel}</div>
-        </div>
         <div>
           <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
             Receive Lease

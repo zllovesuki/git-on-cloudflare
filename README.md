@@ -6,6 +6,8 @@
 
 Host unlimited private Git repositories at the edge with <50ms response times globally. Full Git compatibility, modern web UI, and usage-based pricing that actually makes sense.
 
+> **Upgrade Notice:** The streaming-push closure release removed all legacy receive paths and rollback machinery. If upgrading from a pre-streaming deployment, you **must** first deploy and validate the cutover release (commit `98ad7dd`) before deploying the current version. See `MIGRATION-STREAMING-PUSH.md` for the required deployment sequence.
+
 ## Key Features
 
 - **Complete Git Smart HTTP v2 implementation** with pack protocol support (`ls-refs`, `fetch`, side-band-64k, ofs-delta)
@@ -81,7 +83,7 @@ npm run deploy
 
 Your Git server will deploy to your configured route or to `*.workers.dev`, depending on your Wrangler configuration. Push repos, browse code, manage auth — all from the edge.
 
-> **Upgrading?** If upgrading from a commit before `a76650c`, read `MIGRATION-STREAMING-PUSH.md` for the required deployment sequence.
+> **Upgrading from a pre-streaming deployment?** Read `MIGRATION-STREAMING-PUSH.md` for the required deployment sequence.
 
 ## Authentication
 
@@ -114,21 +116,14 @@ With auth enabled:
 >   push http://127.0.0.1:5173/rachel/my-repo HEAD:refs/heads/main
 > ```
 
-Admin endpoints for hydration and repository management are protected via owner Basic auth and the admin bearer token for `/auth/api/*`. An admin dashboard is available at `/:owner/:repo/admin`.
+Admin endpoints for compaction and repository management are protected via owner Basic auth and the admin bearer token for `/auth/api/*`. An admin dashboard is available at `/:owner/:repo/admin`.
 
 ## Configuration
 
-Environment variables control pack management and unpacking behavior:
+Environment variables:
 
 ```bash
 REPO_DO_IDLE_MINUTES=30      # Cleanup idle repos after 30 min
-REPO_DO_MAINT_MINUTES=1440   # Run maintenance daily
-REPO_KEEP_PACKS=10           # Long-term pack retention
-REPO_PACKLIST_MAX=50         # Max recent packs considered for discovery
-REPO_UNPACK_CHUNK_SIZE=100   # Objects per unpack slice
-REPO_UNPACK_MAX_MS=2000      # Max CPU time per unpack slice
-REPO_UNPACK_DELAY_MS=500     # Delay between slices (ms)
-REPO_UNPACK_BACKOFF_MS=1000  # Backoff when under load (ms)
 LOG_LEVEL=info               # debug|info|warn|error
 ```
 
@@ -144,8 +139,7 @@ See `wrangler.jsonc` for the complete configuration.
 
 ## Limitations
 
-- Receive-pack buffers the uploaded pack in memory inside the Durable Object. Practical pack size limit is ~100–128MB; very large pushes may fail. Split large pushes when needed.
-- 30s CPU limit per request on the main fetch paths (unpack runs in alarm-driven slices)
+- 30s CPU limit per request on fetch and receive paths
 - HTTP(S) only, no SSH protocol support
 - No server-side hooks yet
 - Thin-pack is not advertised; clients receive thick packs (side-band-64k, ofs-delta)

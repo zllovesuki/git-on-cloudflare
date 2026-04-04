@@ -2,7 +2,7 @@ import type { CacheContext } from "@/cache";
 import type { RepoDurableObject } from "@/index";
 
 import { buildPack } from "./git-pack.ts";
-import { buildTreePayload, seedLegacyPackedRepo } from "./packed-repo.ts";
+import { buildTreePayload, seedPackedRepoState } from "./packed-repo.ts";
 import { encodeGitObject } from "@/git/core/index.ts";
 import { env } from "cloudflare:test";
 
@@ -60,7 +60,7 @@ export async function seedPackFirstRepo(repoId: string) {
     { type: "commit", payload: nextCommitPayload },
   ]);
 
-  const seeded = await seedLegacyPackedRepo({
+  const seeded = await seedPackedRepoState({
     env,
     repoId,
     getStub,

@@ -37,9 +37,9 @@ git pull https://your-domain.com/owner/repo
   Fetch objects (clone/pull). Handles pack negotiation and object transfer.
 
   Notes:
-  - Default streaming with side-band-64k progress. Set header `X-Git-Streaming: false` to force the legacy buffered path (deprecated).
+  - Streaming with side-band-64k progress.
   - During negotiation (`done=false`), the server returns an acknowledgments section only (no `packfile` section).
-  - If the repository has not produced any packs yet (loose-only), the server returns `503 Service Unavailable` with headers `Retry-After: 5` and `X-Git-Error: repository-not-ready`.
+  - If the repository has no packs yet, the server returns `503 Service Unavailable` with headers `Retry-After: 5` and `X-Git-Error: repository-not-ready`.
 
 ### Push Operations
 
@@ -55,7 +55,7 @@ git push https://owner:token@your-domain.com/owner/repo main
   Capability advertisement for push operations.
 
 - **`POST /:owner/:repo/git-receive-pack`**  
-  Push objects. In streaming mode (default), the Worker writes `.pack` and `.idx` to R2 and commits metadata atomically via DO RPCs. In legacy mode, forwards to DO `POST /receive` for buffered processing. Requires authentication if `AUTH_ADMIN_TOKEN` is configured.
+  Push objects. The Worker writes `.pack` and `.idx` to R2 and commits metadata atomically via DO RPCs. One active receive lease at a time; concurrent pushes receive `503 Retry-After: 10`. Requires authentication if `AUTH_ADMIN_TOKEN` is configured.
 
 ## Web UI Routes
 
@@ -138,7 +138,7 @@ All admin endpoints require authentication with owner tokens.
 ### Admin UI
 
 - **`GET /:owner/:repo/admin`**  
-  Admin dashboard (HTML) showing refs/HEAD, hydration status, and pack stats.
+  Admin dashboard (HTML) showing refs/HEAD, compaction status, and pack stats.
 
 ### Repository Management
 
@@ -178,13 +178,13 @@ All admin endpoints require authentication with owner tokens.
   Check if a specific OID exists across loose, R2 loose, and packs  
   Params: `:oid` is a 40-hex SHA
 
-### Compaction Aliases (compatibility, rollback window)
+### Compaction
 
-- **`POST /:owner/:repo/admin/hydrate`**  
-  Compatibility alias for `POST /admin/compact`. Previews compaction (`dryRun=true`, the default) or enqueues compaction work (`dryRun=false`). Does not trigger legacy hydration.
+- **`POST /:owner/:repo/admin/compact`**  
+  Previews compaction (`dryRun=true`, the default) or enqueues compaction work (`dryRun=false`).
 
-- **`DELETE /:owner/:repo/admin/hydrate`**  
-  Compatibility alias for `DELETE /admin/compact`. Clears recorded compaction request.
+- **`DELETE /:owner/:repo/admin/compact`**  
+  Clears recorded compaction request.
 
 ### Pack Management
 

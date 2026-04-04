@@ -2,11 +2,11 @@
 
 ## Status
 
-**Phase 5 cutover completed.** Streaming is now the default for new repos. Shadow-read has been retired from the type system. Legacy receive/alarm branches remain callable for repos explicitly set to `legacy` mode (rollback window). See `MIGRATION-STREAMING-PUSH.md` for operator guidance.
+**Streaming is production. Legacy paths removed in closure release.** All repos are streaming. The storage-mode concept, rollback backfill, unpack, hydration, and legacy receive code have been removed. See `MIGRATION-STREAMING-PUSH.md` for upgrade guidance.
 
 This document specifies the streaming push design that replaced the unpack-and-hydrate pipeline.
 
-The new design makes R2 `.pack` and `.idx` objects the only required source of truth for Git object data. The repository Durable Object remains the source of truth for metadata only: refs, HEAD, pack catalog state, receive/compaction leases, and rollout state.
+The new design makes R2 `.pack` and `.idx` objects the only required source of truth for Git object data. The repository Durable Object remains the source of truth for metadata only: refs, HEAD, pack catalog state, and receive/compaction leases.
 
 The design is intentionally conservative about complexity:
 
@@ -16,7 +16,7 @@ The design is intentionally conservative about complexity:
 - No correctness dependency on DO `obj:*` or R2 loose mirrors.
 - No new distributed transaction.
 - No new tunable env vars beyond a single Queue binding.
-- No object-level garbage collection in the initial rollout.
+- No object-level garbage collection in the current design.
 
 ## Why This Exists
 
@@ -40,13 +40,13 @@ The new model replaces all of that with immutable packs in R2, worker-local rang
 6. Existing repos can lose all loose objects and still remain correct.
 7. Fetch becomes naturally pack-first and streaming.
 8. Heavy lifting moves out of the DO and into Workers/Queue consumers.
-9. Rollout remains staged and reversible.
+9. The closure release leaves a single streaming-only end state.
 
 ## Non-Goals and Deliberate Simplifications
 
 These are intentional, not omissions:
 
-1. The rollout does not implement full Git garbage collection of unreachable objects. Compaction preserves the union of source-pack objects. This matches current retention behavior more closely and avoids a repo-wide mark phase in the first release.
+1. The design does not implement full Git garbage collection of unreachable objects. Compaction preserves the union of source-pack objects. This matches current retention behavior more closely and avoids a repo-wide mark phase.
 2. The fetch/read path loads whole `.idx` files into memory when needed. This is acceptable because the representative `.idx` is about 3 MB while the representative `.pack` is about 42 MB. The constraint is “do not buffer the pack”, not “never buffer an idx”.
 3. Push concurrency is simplified to one active receive lease per repo. The current one-active plus one-queued unpack model is removed because unpacking is removed. Returning `503 Retry-After: 10` to concurrent pushes is Git-compatible and materially simpler.
 4. UI raw/blob reads may buffer an individual packed object when it is delta-resolved and not already present in the optional loose cache. This is acceptable because the streaming-first requirement is about pack ingress/egress paths, not ad hoc UI reads; the UI already enforces size caps.
@@ -70,24 +70,20 @@ Optional caches only:
 
 Required for correctness:
 
-- DO KV: `refs`, `head`, `refsVersion`, `packsetVersion`, `nextPackSeq`, receive/compaction leases, rollout mode
+- DO KV: `refs`, `head`, `refsVersion`, `packsetVersion`, `nextPackSeq`, receive/compaction leases
 - DO SQLite: active/superseded pack catalog
 
-Legacy data that must remain on disk for rollback and emergency backfill, but is not required by the new design:
+Legacy data removed in the closure release (stale keys may remain on disk but are not read):
 
-- `pack_objects`
-- `hydr_cover`
-- `hydr_pending`
-- `lastPackOids`
-- `unpackWork`
-- `unpackNext`
-- `obj:*`
+- `pack_objects`, `hydr_cover`, `hydr_pending` (SQLite tables dropped)
+- `lastPackOids`, `lastPackKey`, `packList`, `unpackWork`, `unpackNext` (DO KV keys)
+- `obj:*` (DO loose object cache)
 
 ## Key Design Decisions
 
 ### 1. `.idx` is treated as data-plane state, not repo metadata
 
-Refs, HEAD, pack catalog, leases, and rollout mode remain in the DO. Standard Git `.idx` files live next to `.pack` files in R2 because they are required to address immutable pack contents efficiently. No JSON manifests or repo catalog records are stored in R2.
+Refs, HEAD, pack catalog, and leases remain in the DO. Standard Git `.idx` files live next to `.pack` files in R2 because they are required to address immutable pack contents efficiently. No JSON manifests or repo catalog records are stored in R2.
 
 ### 2. Receive writes pack data first, commits metadata last
 
@@ -124,7 +120,7 @@ This is simpler than full snapshot compaction and good enough for the target wor
 1. The representative push remains within the Worker request body limit. The supplied sample is about 42 MB, which is under the documented minimum 100 MB request-body limit on paid Cloudflare plans.
 2. Workers and Durable Objects run with a 128 MB memory limit; request/response streaming is available; R2 `put()` accepts a `ReadableStream`; R2 ranged reads are strongly supported in Workers; Queue consumers have 15 minutes of wall time.
 3. Active pack count is kept low by compaction, so loading a handful of `.idx` files into memory is safe and simpler than inventing a second metadata structure.
-4. Existing repos that already have packs in R2 are the primary migration case. Loose-only repos need an explicit one-time pack migration before they can be switched to the new correctness path.
+4. Existing repos that already had packs in R2 were the primary cutover migration case. Closure assumes that any loose-only repos already completed the required one-time pack migration before this release.
 
 ## Cloudflare Constraints Used By The Design
 
@@ -187,32 +183,6 @@ Notes:
 - `receiveLease`
 - `compactLease`
 - `compactionWantedAt`
-- `repoStorageMode`
-
-`repoStorageMode` controls the repo's receive and alarm behavior.
-
-> **Post-cutover:** `repoStorageMode` is `"legacy" | "streaming"`. Direct `legacy -> streaming` is allowed when the repo has active packs or is truly empty. `streaming -> legacy` requires rollback backfill or a truly empty repo. The three-mode rules below are preserved as historical rollout context.
-
-Historical rollout values (prior to Phase 5 cutover):
-
-- `legacy`
-- `shadow-read` (retired — auto-normalized to `streaming` on DO access)
-- `streaming`
-
-This is repo-local, not an env var.
-
-Historical admin control surface rules (prior to Phase 5 cutover):
-
-- the admin UI and admin endpoint exposed `legacy`, `shadow-read`, and `streaming`;
-- both `legacy` and `shadow-read` kept fetch/UI reads on the same pack-first Worker path;
-- `legacy` disabled packed-vs-compatibility validation;
-- `shadow-read` enabled packed-vs-compatibility validation;
-- `legacy -> shadow-read` required at least one active pack in `pack_catalog`;
-- `legacy -> streaming` was rejected; canary rollout moved one step at a time through `shadow-read`;
-- `shadow-read -> streaming` required at least one active pack in `pack_catalog`;
-- `streaming -> legacy|shadow-read` required rollback compatibility data prepared for the current `packsetVersion`;
-- `shadow-read -> legacy` was the fast way to disable validation if canary noise appeared;
-- mode changes are blocked while a receive lease or compaction lease is active.
 
 Lease contents:
 
@@ -229,14 +199,9 @@ Expired leases are cleared:
 - on the next `beginReceive()` / `beginCompaction()` call; and
 - by a lightweight DO alarm cleanup path.
 
-### Legacy compatibility mirrors
+### Legacy compatibility mirrors (removed in closure)
 
-During rollout, keep updating:
-
-- `packList`
-- `lastPackKey`
-
-These become mirrors of the active catalog order for rollback and debugging only. `lastPackOids` is not kept current once the streaming receive path is enabled.
+`packList`, `lastPackKey`, and `lastPackOids` were maintained as mirrors during rollout for rollback compatibility. They have been removed in the closure release. `pack_catalog` is the sole authority for pack metadata.
 
 ## Cross-System Mutation Rules
 
@@ -275,7 +240,7 @@ The Worker handles receive-pack end to end. The DO is used only for:
 - committing ref changes and the new pack row;
 - clearing the lease.
 
-The DO exposes `POST /receive` only for repos in `legacy` mode during the rollback window. Streaming repos use typed RPCs instead.
+The DO does not expose any HTTP receive endpoint. All receive coordination uses typed RPCs.
 
 ### Client-visible behavior
 
@@ -313,7 +278,7 @@ Changed internally:
     - rechecks `old-oid` expectations against current refs;
     - allocates `nextPackSeq`;
     - inserts the new active pack row;
-    - updates `refs`, `head`, `refsVersion`, `packsetVersion`, `packList`, and `lastPackKey`;
+    - updates `refs`, `head`, `refsVersion`, and `packsetVersion`;
     - sets or refreshes `compactionWantedAt` if the catalog now violates the compaction policy;
     - clears the receive lease;
     - returns whether compaction should be queued.
@@ -586,7 +551,7 @@ Permitted uses:
 
 - hot tree/commit/tag cache
 - hot raw/blob cache
-- temporary compatibility shims during rollout
+- debug-only loose fallbacks
 
 ## Background Compaction
 
@@ -663,7 +628,7 @@ The full active catalog is passed so that delta bases outside the source set are
    - rechecks that the selected source packs are still active and unchanged;
    - marks the new pack active;
    - marks source packs superseded;
-   - updates `packList`, `lastPackKey`, and `packsetVersion`;
+   - updates `packsetVersion`;
    - clears or refreshes `compactionWantedAt` based on the post-commit catalog state;
    - clears the compaction lease.
 9. The worker deletes superseded R2 blobs best-effort in `waitUntil(...)`.
@@ -679,25 +644,23 @@ It does not:
 
 ## Existing Repositories
 
-### Existing packed repos
+### Existing packed repos (pre-closure migration, now completed)
 
-Migration is automatic:
+Migration was automatic during the cutover phase:
 
-1. On DO startup or first access, if `pack_catalog` is empty:
-   - seed from the union of `lastPackKey`, `packList`, and the full R2 `.pack` listing under the repo prefix;
-   - ignore `pack_objects` for correctness.
+1. On DO startup or first access, if `pack_catalog` was empty:
+   - seeded from the union of `lastPackKey`, `packList`, and the full R2 `.pack` listing under the repo prefix (these keys no longer exist post-closure);
+   - ignored `pack_objects` for correctness.
 2. For each discovered pack:
-   - require `.pack` and `.idx` to exist;
-   - parse `.idx` fanout to get object count;
-   - insert a `legacy` `active` row into `pack_catalog`;
-   - assign synthetic sequential `seqLo = seqHi` values by:
-     - preserving `packList` / `lastPackKey` order when available;
-     - appending any R2-only packs in `uploaded` order so no existing pack is omitted.
-3. Legacy `pack-hydr-*` packs are inserted as normal active packs. They have no special correctness role under the new design.
+   - required `.pack` and `.idx` to exist;
+   - parsed `.idx` fanout to get object count;
+   - inserted a `legacy` `active` row into `pack_catalog`;
+   - assigned synthetic sequential `seqLo = seqHi` values.
+3. Legacy `pack-hydr-*` packs were inserted as normal active packs.
 
-### Existing loose-only repos
+### Existing loose-only repos (pre-closure migration, now completed)
 
-These cannot switch directly to `repoStorageMode = streaming`.
+These could not switch directly to `repoStorageMode = streaming` during the cutover migration.
 
 Required migration:
 
@@ -707,26 +670,11 @@ Required migration:
 4. Insert it into `pack_catalog` as a `legacy` active pack.
 5. Leave loose data untouched.
 
-Only after that migration completes may the repo be switched to streaming mode.
+Only after that migration completed could the repo be promoted during cutover.
 
-### Emergency rollback after a canary repo accepted streaming pushes
+### Emergency rollback (removed in closure release)
 
-Because streaming receive no longer writes `pack_objects` or loose correctness data, emergency rollback for an affected repo requires a backfill tool.
-
-The emergency backfill tool must:
-
-1. read the active pack catalog;
-2. materialize objects from packs;
-3. repopulate legacy `obj:*` and `pack_objects`;
-4. leave new pack data untouched.
-
-Operational notes:
-
-- the trigger is a separate admin endpoint so storage-mode updates stay pure;
-- the backfill state is keyed to the current `packsetVersion`, so a later streaming push or compaction makes older rollback data stale;
-- queue-driven worker slices are allowed here even though compaction remains deferred.
-
-This tool is intentionally admin-only and only needed during phase-3 canaries.
+The emergency backfill tool described here was used during the phase-3 canary rollout and has been removed in the closure release. See `docs/streaming-push-closure-plan.md` for details.
 
 ## Compatibility Surface
 
@@ -745,22 +693,16 @@ Internal headers:
 
 These remain worker-internal and continue to exist if callers still use them.
 
-### RPC compatibility
+### RPC compatibility (historical)
 
-The rollout must make the following compatibility story explicit in code:
+The following RPCs were removed across phases 1-5 and the closure release:
 
-- `getObjectStream`, `getObject`, and `getObjectSize`
-  - become pack-first shims or are removed from all correctness callers in phase 2;
-- `hasLooseBatch`
-  - is replaced by `hasObjectsBatch` semantics and may remain only as a compatibility wrapper;
-- `getObjectRefsBatch`
-  - is replaced by a worker-local packed-object batch reader;
-- `getPackLatest`, `getPackOids`, and `getPackOidsBatch`
-  - stop being correctness inputs for fetch planning and become compatibility-only or are removed from callers;
-- `getUnpackProgress`
-  - is removed from route preflight logic and replaced by `beginReceive()` lease acquisition.
-
-No implementation phase may leave a correctness path half-migrated across these APIs.
+- `getObjectStream`, `getObject`, `getObjectSize` — replaced by worker-local pack-first reads
+- `hasLooseBatch` — replaced by `hasObjectsBatch` over pack catalog
+- `getObjectRefsBatch` — replaced by worker-local packed-object batch reader
+- `getPackLatest`, `getPackOids`, `getPackOidsBatch` — replaced by `pack_catalog` as sole authority
+- `getUnpackProgress` — replaced by `beginReceive()` lease acquisition
+- `getRepoStorageMode`, `setRepoStorageModeGuarded` — storage-mode concept removed
 
 ### Progress and activity UI
 
@@ -794,63 +736,17 @@ During phase 2, these files may continue to render a banner, but they must stop 
 
 ### Admin endpoints
 
-Current hydration routes are retained as compatibility aliases during rollout:
+- `POST /:owner/:repo/admin/compact` — returns a compaction plan by default and triggers compaction when `dryRun === false`
+- `DELETE /:owner/:repo/admin/compact` — clears queued compaction work for the repo
 
-- `POST /:owner/:repo/admin/hydrate`
-- `DELETE /:owner/:repo/admin/hydrate`
-
-New semantics:
-
-- `POST` returns a compaction plan by default and triggers compaction when `dryRun === false`;
-- `DELETE` clears queued compaction work for the repo, not “hydration packs”.
-
-Add explicit new aliases:
-
-- `POST /:owner/:repo/admin/compact`
-- `DELETE /:owner/:repo/admin/compact`
-
-Add a small storage-mode control endpoint:
-
-- `GET /:owner/:repo/admin/storage-mode`
-- `PUT /:owner/:repo/admin/storage-mode`
-- `POST /:owner/:repo/admin/storage-mode/backfill`
-
-> **Post-cutover:** `PUT` accepts only `legacy` and `streaming`. The `shadow-read` mode and its transition rules below are historical.
-
-`PUT` historically accepted:
-
-- `legacy`
-- `shadow-read` (retired)
-- `streaming`
-
-Mode meaning during the streaming-receive rollout:
-
-- `legacy`: packed reads remain authoritative and validation is disabled
-- `shadow-read`: the same packed reads remain authoritative and are validated against compatibility reads (retired)
-- `streaming`: packed reads remain authoritative and pushes stream directly into staged R2 packs before DO metadata commit
-
-`POST /admin/storage-mode/backfill`:
-
-- is admin-only;
-- queues rollback compatibility preparation for the current `packsetVersion`;
-- does not change storage mode by itself;
-- backfills `obj:*` and `pack_objects` additively, without deleting any pack data.
-
-It must reject:
-
-- mode changes while a receive lease is active
-- mode changes while a compaction lease is active
-- `legacy -> streaming` when the repo has no active packs and is not truly empty (the unsupported loose-only case)
-- `streaming -> legacy` when rollback compatibility data is missing or stale for the current `packsetVersion` and the repo is not truly empty
-
-Do not remove the `/hydrate` routes until the admin UI has been migrated and the rollback window has closed.
+The `/admin/hydrate` aliases and `/admin/storage-mode` endpoints were removed in the closure release.
 
 Current pack-deletion admin behavior must also change:
 
 - `DELETE /:owner/:repo/admin/pack/:packKey`
   - may only delete `superseded` packs;
   - must reject deletion of `active` packs by default;
-  - any forced delete of an `active` pack remains an explicit admin-only break-glass path and is outside normal rollout assumptions.
+  - any forced delete of an `active` pack remains an explicit admin-only break-glass path and is outside normal operating assumptions.
 
 ### Debug/admin fields
 
@@ -862,11 +758,7 @@ Replace loose/unpack/hydration-centric fields with:
 - `supersededPacks`
 - `packCatalogVersion`
 
-Keep legacy fields in debug output during rollout, but mark them as compatibility-only and allow them to show neutral values:
-
-- `unpacking: false`
-- `queuedCount: 0`
-- `lastPackOids: undefined`
+Legacy debug fields (`unpacking`, `queuedCount`, `lastPackOids`, `repoStorageMode`, `hydration*`) were removed in the closure release.
 
 Current debug endpoints must stay functional, but they must read through the pack-first object store:
 
@@ -874,42 +766,26 @@ Current debug endpoints must stay functional, but they must read through the pac
 - `GET /:owner/:repo/admin/debug-commit/:commit`
 - `GET /:owner/:repo/admin/debug-oid/:oid`
 
-Admin UI migration rule:
+Admin UI migration (completed):
 
-- phase 2 introduces parallel compaction-oriented props and debug fields;
-- phase 3 stops deriving status from `pack-hydr-*`, `unpackWork`, `hydrationQueue`, and hydration-pack counts;
-- phase 4 may rename UI components and types, but the compatibility alias endpoints remain until the rollback window closes.
+- The admin island uses compaction-derived status exclusively
+- `StorageModeCard` and `HydrationCard` components have been removed
+- Pack-removal warnings reference compaction supersession, not hydration
 
-Files that must be migrated together:
+## What Was Removed (Closure Release)
 
-- `src/routes/ui/helpers.ts`
-- `src/do/repo/debug.ts`
-- `src/client/islands/repo-admin/types.ts`
-- `src/client/islands/repo-admin/useRepoAdminActions.ts`
-- `src/client/islands/repo-admin/RepoOverviewCard.tsx`
-- `src/client/islands/repo-admin/HydrationCard.tsx`
-- `src/client/islands/repo-admin/PackFilesCard.tsx`
-- `src/client/islands/repo-admin/index.tsx`
+The following subsystems were removed in the closure release:
 
-Required compatibility behavior during the rollout window:
-
-- the admin island may keep the existing `hydration*` prop names temporarily, but those props must be populated from compaction data, not legacy hydration state;
-- pack-removal warnings must change from “hydration packs can break fetch” to “active packs may still be referenced until compaction supersedes them”;
-- `pack-hydr-*` filename matching must not remain the source of truth for repo status once phase 2 begins.
-
-## What Becomes Obsolete
-
-The following subsystems become legacy-only once rollout is complete:
-
-- DO `POST /receive`
-- background unpacking
-- hydration planning
-- hydration segment building
-- `pack_objects` as correctness state
-- `lastPackOids` as a read shortcut
-- `hasLooseBatch()` as a correctness API
-
-The data/schema remain on disk. The product stops depending on them.
+- DO `POST /receive` endpoint
+- Background unpacking (alarm-driven loose object extraction)
+- Hydration planning and segment building
+- `pack_objects`, `hydr_cover`, `hydr_pending` SQLite tables
+- `lastPackOids`, `lastPackKey`, `packList` DO KV keys
+- `hasLooseBatch()`, `getObjectStream()`, `getObjectSize()`, `getPackLatest()`, `getPackOids()`, `getPackOidsBatch()` RPCs
+- `RepoStorageMode` type and all storage-mode switching
+- Rollback backfill machinery
+- `isomorphic-git` dependency
+- Configuration: `REPO_UNPACK_*`, `REPO_KEEP_PACKS`, `REPO_PACKLIST_MAX`, `REPO_DO_MAINT_MINUTES`
 
 ## Module Deliverables
 
@@ -966,7 +842,7 @@ Primary files to update:
 - `src/client/islands/repo-admin/index.tsx`
 - `src/git/operations/closure.ts`
 - `src/git/operations/fetch/neededFast.ts`
-- `src/git/operations/packDiscovery.ts`
+- `src/git/object-store/catalog.ts`
 - `src/git/operations/read/diff.ts`
 - `src/git/operations/read/objects.ts`
 - `src/git/operations/read/tree.ts`
@@ -974,161 +850,29 @@ Primary files to update:
 - `src/git/pack/assemblerStream.ts`
 - `wrangler.jsonc`
 
-## Phased Implementation Plan
+## Phased Implementation Plan (completed)
 
-Each phase below is a releasable slice.
+> **Archival:** All phases are complete and the closure release has removed all legacy code paths. This section is preserved as historical rollout context. See `MIGRATION-STREAMING-PUSH.md` for the current operator guide.
 
-> **Archival:** Phases 1-4 are complete. `shadow-read` canaries are retired. This section is preserved as historical rollout context. See `MIGRATION-STREAMING-PUSH.md` for the current operator guide.
+### Phase 1: Pack Catalog and Worker Object Store Shadow Mode (completed)
 
-### Phase 1: Pack Catalog and Worker Object Store Shadow Mode
+Added `pack_catalog` schema and DAL helpers, DO helpers for catalog reads/leases/legacy seeding, worker-local `IdxView` and packed-object resolver, read-path shadow validators, and queue binding. Automatic `pack_catalog` backfill for packed repos.
 
-Deliverables:
+### Phase 2: Read Path Cutover (completed)
 
-- add `pack_catalog` schema and DAL helpers;
-- add DO helpers for catalog reads, leases, and legacy pack-catalog seeding;
-- add worker-local `IdxView` and packed-object resolver;
-- add read-path shadow validators that compare packed-object reads against legacy reads when `repoStorageMode = shadow-read`;
-- add queue binding in `wrangler.jsonc`, but do not trigger compaction yet.
+Switched fetch planning, object reads, and all UI routes to worker-local pack-first object store. Removed correctness dependence on DO `getObject*`, `hasLooseBatch`, `getPackOids*`, and `getObjectRefsBatch`. Replaced unpack-progress UI with repo-activity UI. Added admin-only storage-mode control for canary validation.
 
-Migration work:
+### Phase 3: Streaming Receive Cutover (completed)
 
-- automatic `pack_catalog` backfill for packed repos;
-- no behavior change for receive path;
-- no behavior change for admin routes yet.
+Added receive lease RPCs, staged R2 write, pack indexer, thin-pack validation, connectivity checks, and DO finalization. Kept `packList` and `lastPackKey` mirrored for rollback. Added emergency legacy backfill tooling for canary rollback.
 
-Validation gate:
+### Phase 4: Queue-Driven Compaction (completed)
 
-- `npm run typecheck`
-- existing worker tests remain green
-- new tests proving packed-object reads match legacy loose reads on seeded repos
+Implemented `beginCompaction` / `commitCompaction` / `abortCompaction` and queue consumer. Tiered compaction of active catalog. Repurposed `/admin/hydrate` as compaction alias and added `/admin/compact`.
 
-Not done until:
+### Phase 5: Legacy Path Retirement (completed)
 
-- a repo with only packed data can answer object reads through the new object store with loose data deleted in test setup;
-- no caller outside migration/debug reads `pack_catalog` directly without the DAL.
-
-### Phase 2: Read Path Cutover
-
-Deliverables:
-
-- switch fetch planning, object reads, raw/blob/tree/commit/diff routes to the new worker-local object store;
-- stop correctness dependence on DO `getObject*`, `hasLooseBatch`, `getPackOids*`, and `getObjectRefsBatch`;
-- keep those RPCs only as compatibility shims or debug-only helpers;
-- update admin/debug output to show pack-catalog state;
-- replace unpack-progress UI with repo-activity UI and migrate the admin island from hydration-derived status to compaction-derived status;
-- add an admin-only storage-mode control that reads the current mode and switches between `legacy` and `shadow-read` with lease and active-pack guardrails;
-- keep fetch/UI serving on the pack-first object store in both modes; the control only toggles validation;
-- replace loose-oriented test seeding with pack-first helpers so new tests do not silently depend on `obj:*`.
-
-Migration work:
-
-- set selected repos to `repoStorageMode = shadow-read` first;
-- use `shadow-read` canaries to validate packed reads before streaming receive and compaction land.
-
-Validation gate:
-
-- `npm run typecheck`
-- relevant worker fetch/UI tests
-- new tests that delete DO `obj:*` and R2 loose mirrors and then verify fetch, tree, blob, raw, commit, and diff still work
-
-Not done until:
-
-- no fetch/UI correctness path depends on loose objects;
-- no page or admin island still derives status from `unpackWork`, `unpackNext`, `hydrationQueue`, or `pack-hydr-*`;
-- `readLooseObjectRaw()` is either removed from callers or reimplemented as a pack-first compatibility wrapper.
-
-### Phase 3: Streaming Receive Cutover
-
-Deliverables:
-
-- keep the DO `/receive` path as compatibility for `legacy` and `shadow-read`, and use worker-local streaming receive for `repoStorageMode = streaming`;
-- add receive lease RPCs;
-- implement staged R2 write, new indexer, thin-pack validation, connectivity checks, and DO finalization;
-- keep `packList` and `lastPackKey` mirrored for rollback;
-- add emergency legacy backfill tooling plus a separate admin trigger for canary rollback.
-
-Migration work:
-
-- selected repos move `legacy -> shadow-read -> streaming`;
-- enable `repoStorageMode = streaming` only for canary repos that already have at least one active pack;
-- loose-only repos must complete one-time pack migration first.
-- phase 3 is canary-only; broad rollout is blocked on phase 4 compaction.
-
-Validation gate:
-
-- `npm run typecheck`
-- receive-pack worker tests rewritten for single active receive lease behavior
-- new tests for:
-  - delete-only push
-  - stale old-oid
-  - invalid ref
-  - thin pack with external base present
-  - thin pack with missing external base rejected
-  - push followed by deletion of all loose data, then fetch still works
-
-Not done until:
-
-- no code path buffers the entire receive-pack request body;
-- the sample target workload can be pushed locally without exceeding memory;
-- staged pack cleanup on failure is tested.
-
-### Phase 4: Queue-Driven Compaction
-
-Deliverables:
-
-- implement `beginCompaction` / `commitCompaction` / `abortCompaction`;
-- implement queue consumer;
-- compact tier overflows into the next tier;
-- update fetch pack discovery to read only the active catalog;
-- repurpose `/admin/hydrate` as a compaction alias and add `/admin/compact`.
-
-Migration work:
-
-- stop scheduling unpack/hydration for repos in streaming mode;
-- keep legacy unpack/hydration data untouched;
-- migrate admin UI text and helper logic from hydration to compaction, including `src/client/islands/repo-admin/*` and `src/routes/ui/helpers.ts`.
-
-Validation gate:
-
-- `npm run typecheck`
-- worker tests covering:
-  - compaction trigger
-  - version/lease conflict handling
-  - receive-priority conflict where compaction commit is forced to retry
-  - source-pack supersession
-  - fetch correctness during and after compaction
-
-Not done until:
-
-- active pack count stays bounded in tests after repeated pushes;
-- compaction never requires loose objects;
-- old source packs are only deleted after successful catalog commit.
-
-### Phase 5: Legacy Path Retirement
-
-Deliverables:
-
-- remove legacy receive/unpack/hydration methods from active code paths;
-- keep legacy data/schema in place;
-- keep legacy unpack/hydration Wrangler vars and compatibility route aliases in place until the rollback window closes;
-- keep the emergency backfill tool until rollout is declared complete;
-- downgrade legacy RPCs and tests to compatibility-only or delete them once the rollback window closes.
-
-Migration work:
-
-- move all repos to `repoStorageMode = streaming`;
-- keep canary rollback procedure documented until the emergency backfill tool is no longer required.
-
-Validation gate:
-
-- `npm run typecheck`
-- full relevant worker suite
-- manual canary checklist signed off
-
-Not done until:
-
-- `repoDO.ts` remains a thin delegator;
-- no correctness test exercises unpack or hydration.
+Removed legacy receive/unpack/hydration methods from active code paths. Moved all repos to streaming. Removed legacy RPCs and tests. The closure release then removed all remaining legacy code, schema, and configuration.
 
 ## Automated Testing Plan
 
@@ -1142,27 +886,22 @@ Automated tests must not assume `uncommitted-fixture/` is committed.
 4. Fetch works after deleting all DO `obj:*`.
 5. Fetch works after deleting all R2 loose mirrors.
 6. `hasObjectsBatch()` and `readObjectRefsBatch()` are pack-first.
-7. Active catalog backfill from legacy `packList` works.
-8. Legacy loose-only migration produces the first active pack.
-9. Compaction replaces source packs and keeps fetch correct.
-10. Emergency legacy backfill reconstructs rollback data from active packs.
-11. `DELETE /admin/pack/:packKey` rejects deletion of active packs.
-12. Debug endpoints continue to work after all loose data is removed.
-13. `/admin/hydrate` continues to function as a compatibility alias for compaction during rollout.
-14. Test repo seed helpers can build pack-only repos without writing loose objects.
-15. Pack-first test seeding replaces `seedMinimalRepo()` loose assumptions in new and migrated tests.
+7. Compaction replaces source packs and keeps fetch correct.
+8. `DELETE /admin/pack/:packKey` rejects deletion of active packs.
+9. Debug endpoints continue to work after all loose data is removed.
+10. Test repo seed helpers can build pack-only repos without writing loose objects.
+11. Pack-first test seeding replaces `seedMinimalRepo()` loose assumptions in new and migrated tests.
 
-### Legacy tests that become compatibility-only
+### Legacy tests (removed in closure)
+
+The following test categories were deleted in the closure release:
 
 - hydration clear/delete tests
 - unpack progress tests
 - one-deep unpack queue tests
 - `pack_objects` exact membership tests
-
-These should either be:
-
-- rewritten to assert compatibility shims during the rollout window, or
-- deleted in phase 5.
+- storage-mode transition tests
+- rollback compatibility tests
 
 ### Performance and memory tests
 
@@ -1209,18 +948,18 @@ The rollout is successful only if all of the following are true:
 
 ---
 
-## Closure Release Implementation Checklist
+## Closure Release Implementation Checklist (completed)
 
-After the rollback window closes, a future session removes all remaining compatibility-only surfaces. This checklist is the agent-facing task list for that work:
+All items below were completed in the closure release. See `docs/streaming-push-closure-plan.md` for the full implementation plan.
 
-1. Remove emergency backfill tool: `src/maintenance/legacyCompatBackfill.ts`, `src/do/repo/catalog/legacyCompat.ts`, backfill RPCs, `POST /admin/storage-mode/backfill`, `LegacyCompatBackfillState`, `test/streaming-receive.rollback.worker.test.ts`
-2. Remove `/admin/hydrate` aliases and `startHydration`/`clearHydration` RPCs
-3. Remove `mirrorLegacyPackKeys()` and `lastPackKey`/`lastPackOids`/`packList` from `RepoStateSchema`
-4. Remove `REPO_UNPACK_*` from `wrangler.jsonc`, `repoConfig.ts`, `vitest.bindings.ts`; run `npm run cf-typegen`
-5. Delete `src/do/repo/unpack.ts`, `src/do/repo/repoDO/receive.ts`, `src/do/repo/repoDO/hydration.ts`, `src/do/repo/hydration/`, `src/git/operations/receive.ts`, `src/git/pack/loose-loader.ts`, `src/git/pack/unpack.ts` (rewrite `seeding.ts` first)
-6. Remove `unpackWork`, `unpackNext`, `hydrationWork`, `hydrationQueue` and types from `RepoStateSchema`
-7. Drop `pack_objects`, `hydr_cover`, `hydr_pending` tables via `npm run db:gen`
-8. Remove `isomorphic-git` from `package.json` and `vitest.config.ts`
-9. Remove `RepoStorageMode` type and all storage-mode RPCs/admin endpoints
-10. Delete remaining legacy tests: `receive-push`, `receive-queue`, `fetch-during-unpack`, `create-mem-pack-fs`, `calculate-stable-epochs`, `migrate-packkeys`, `unpack-progress`, `hydration-coverage-epochs`, `hydration-clear-deletes-packobjects`, `maintenance` hydration assertions
-11. Final docs cleanup: mark closure complete, remove all legacy references
+1. ~~Remove emergency backfill tool~~ -- done
+2. ~~Remove `/admin/hydrate` aliases and `startHydration`/`clearHydration` RPCs~~ -- done
+3. ~~Remove `mirrorLegacyPackKeys()` and `lastPackKey`/`lastPackOids`/`packList` from `RepoStateSchema`~~ -- done
+4. ~~Remove `REPO_UNPACK_*` from `wrangler.jsonc`, `repoConfig.ts`, `vitest.bindings.ts`~~ -- done
+5. ~~Delete legacy receive, unpack, hydration code~~ -- done
+6. ~~Remove `unpackWork`, `unpackNext`, `hydrationWork`, `hydrationQueue` from `RepoStateSchema`~~ -- done
+7. ~~Drop `pack_objects`, `hydr_cover`, `hydr_pending` tables~~ -- done
+8. ~~Remove `isomorphic-git` from `package.json`~~ -- done
+9. ~~Remove `RepoStorageMode` type and all storage-mode RPCs/admin endpoints~~ -- done
+10. ~~Delete remaining legacy tests~~ -- done
+11. ~~Final docs cleanup~~ -- done

@@ -8,7 +8,6 @@ import {
   badRequest,
   computeStorageMetrics,
   computeCompactionStatus,
-  computeNextMaintenance,
   getDefaultBranchFromHead,
   loadHeadAndRefsCached,
   type DebugState,
@@ -37,8 +36,6 @@ export async function handleAdminPage(request: RouteRequest, env: Env, ctx: Exec
     loadHeadAndRefsCached(env, request, ctx, repoId),
     getRepoActivity(env, repoId),
   ]);
-  const storageModeControl = await stub.getRepoStorageModeControl().catch(() => undefined);
-
   const head: HeadInfo | undefined = refsData?.head || undefined;
   const refs: Ref[] = refsData?.refs || [];
 
@@ -47,11 +44,6 @@ export async function handleAdminPage(request: RouteRequest, env: Env, ctx: Exec
 
   const defaultBranch = getDefaultBranchFromHead(head);
   const refEnc = encodeURIComponent(defaultBranch);
-
-  const { nextMaintenanceIn, nextMaintenanceAt } = computeNextMaintenance(
-    env,
-    typeof state?.lastMaintenanceMs === "number" ? state.lastMaintenanceMs : undefined
-  );
 
   const html = await renderUiView(env, "admin", {
     title: `Admin · ${owner}/${repo}`,
@@ -64,15 +56,12 @@ export async function handleAdminPage(request: RouteRequest, env: Env, ctx: Exec
     packCount,
     packList,
     state,
-    storageModeControl,
     defaultBranch,
     compactionStatus,
     compactionStartedAt,
     compactionData: state.compaction,
     supersededPackCount,
     progress,
-    nextMaintenanceIn,
-    nextMaintenanceAt,
   });
   if (!html) {
     return new Response("Failed to render view", { status: 500 });

@@ -4,15 +4,8 @@ import {
   handleCompactionDeleteMessage,
   handleCompactionMessage,
 } from "./compaction.ts";
-import {
-  handleLegacyCompatBackfillMessage,
-  type LegacyCompatBackfillQueueMessage,
-} from "./legacyCompatBackfill.ts";
 
-export type RepoMaintenanceQueueMessage =
-  | CompactionDeleteQueueMessage
-  | CompactionQueueMessage
-  | LegacyCompatBackfillQueueMessage;
+export type RepoMaintenanceQueueMessage = CompactionDeleteQueueMessage | CompactionQueueMessage;
 
 function isCompactionMessage(value: unknown): value is CompactionQueueMessage {
   if (!value || typeof value !== "object") return false;
@@ -38,18 +31,6 @@ function isCompactionDeleteMessage(value: unknown): value is CompactionDeleteQue
   );
 }
 
-function isLegacyCompatBackfillMessage(value: unknown): value is LegacyCompatBackfillQueueMessage {
-  if (!value || typeof value !== "object") return false;
-
-  const body = value as Record<string, unknown>;
-  return (
-    body.kind === "legacy-backfill" &&
-    typeof body.repoId === "string" &&
-    typeof body.jobId === "string" &&
-    typeof body.targetPacksetVersion === "number"
-  );
-}
-
 export async function handleRepoMaintenanceQueue(
   batch: MessageBatch<RepoMaintenanceQueueMessage>,
   env: Env,
@@ -68,11 +49,7 @@ export async function handleRepoMaintenanceQueue(
       continue;
     }
 
-    if (!isLegacyCompatBackfillMessage(body)) {
-      message.ack();
-      continue;
-    }
-
-    await handleLegacyCompatBackfillMessage(message, body, env, ctx);
+    // Unknown message type — ack and discard
+    message.ack();
   }
 }

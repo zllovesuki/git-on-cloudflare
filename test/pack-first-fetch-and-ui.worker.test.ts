@@ -6,9 +6,10 @@ import type { RepoStateSchema } from "@/do/repo/repoState.ts";
 import { buildPack, callStubWithRetry, runDOWithRetry, uniqueRepoId } from "./util/test-helpers.ts";
 import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
 import { encodeGitObject, concatChunks } from "@/git/core/index.ts";
-import { indexPackOnly } from "@/git/pack/index.ts";
 import { doPrefix, r2LooseKey, r2PackKey } from "@/keys.ts";
 import { buildTreePayload } from "./util/packed-repo.ts";
+import { indexTestPack } from "./util/test-indexer.ts";
+import { getDb, upsertPackCatalogRow } from "@/do/repo/db/index.ts";
 import { buildFetchBody, findBytes } from "./util/fetch-protocol.ts";
 
 async function seedPackedOnlyRepo(repoId: string) {
@@ -62,26 +63,38 @@ async function seedPackedOnlyRepo(repoId: string) {
   await runDOWithRetry(getStub, async (_instance, state) => {
     const prefix = doPrefix(state.id.toString());
     const store = asTypedStorage<RepoStateSchema>(state.storage);
-    const packKeys: string[] = [];
-    let lastPackOids: string[] = [];
+    const db = getDb(state.storage);
 
     for (const obj of looseObjects) {
       await store.put(objKey(obj.oid), obj.zdata);
       await env.REPO_BUCKET.put(r2LooseKey(prefix, obj.oid), obj.zdata);
     }
 
-    for (let i = 0; i < packs.length; i++) {
-      const pack = packs[i];
+    let nextSeq = (await store.get("nextPackSeq")) || 1;
+    for (const pack of packs) {
       const packKey = r2PackKey(prefix, pack.name);
-      packKeys.push(packKey);
       await env.REPO_BUCKET.put(packKey, pack.packBytes);
-      const oids = await indexPackOnly(pack.packBytes, env, packKey, state, prefix);
-      if (i === 0) lastPackOids = oids;
+
+      const resolveResult = await indexTestPack(env, packKey, pack.packBytes.byteLength);
+      const seq = nextSeq++;
+      await upsertPackCatalogRow(db, {
+        packKey,
+        kind: "receive",
+        state: "active",
+        tier: 0,
+        seqLo: seq,
+        seqHi: seq,
+        objectCount: resolveResult.objectCount,
+        packBytes: pack.packBytes.byteLength,
+        idxBytes: resolveResult.idxBytes,
+        createdAt: Date.now(),
+        supersededBy: null,
+      });
     }
 
-    await store.put("lastPackKey", packKeys[0]);
-    await store.put("lastPackOids", lastPackOids);
-    await store.put("packList", packKeys);
+    const packsetVersion = ((await store.get("packsetVersion")) || 0) + 1;
+    await store.put("packsetVersion", packsetVersion);
+    await store.put("nextPackSeq", nextSeq);
     await store.put("refs", [{ name: "refs/heads/main", oid: commit2.oid }]);
     await store.put("head", { target: "refs/heads/main", oid: commit2.oid });
   });

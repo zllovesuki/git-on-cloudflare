@@ -1,10 +1,3 @@
-import type {
-  RollbackCompatControl,
-  RepoStorageMode,
-  RepoStorageModeControl,
-  RepoStorageModeMutationResult,
-} from "@/contracts/repoStorageMode.ts";
-
 export type PackStat = {
   key: string;
   kind: "receive" | "compact" | "legacy";
@@ -27,17 +20,9 @@ export type CompactionData = {
   wantedAt?: number;
 };
 
-export type {
-  RepoStorageMode,
-  RepoStorageModeControl,
-  RepoStorageModeMutationResult,
-  RollbackCompatControl,
-};
-
 export type AdminState = {
   packStats?: PackStat[];
   meta?: { doId?: string };
-  repoStorageMode?: string;
   packCatalogVersion?: number;
   activePacks?: PackStat[];
   supersededPacks?: PackStat[];
@@ -46,7 +31,6 @@ export type AdminState = {
     expiresAt: number;
   };
   compaction?: CompactionData;
-  rollbackCompat?: RollbackCompatControl;
   looseR2SampleBytes?: number;
   looseR2SampleCount?: number;
   looseR2Truncated?: boolean;
@@ -63,12 +47,9 @@ export type RepoAdminProps = {
   packCount: number;
   packList: string[];
   state: AdminState;
-  storageModeControl?: RepoStorageModeControl;
   defaultBranch: string;
   compactionStatus: string;
   compactionStartedAt?: string | null;
   compactionData?: CompactionData;
   supersededPackCount: number;
-  nextMaintenanceIn?: string;
-  nextMaintenanceAt?: string;
 };

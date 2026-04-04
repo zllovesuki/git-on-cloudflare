@@ -16,10 +16,6 @@ type HeadPayload = {
   unborn?: boolean;
 };
 
-type StorageModePayload = {
-  mode: string;
-};
-
 type AdminRouteRequest = Request & {
   params: { owner: string; repo: string; [key: string]: string };
 };
@@ -35,10 +31,6 @@ function isHeadPayload(value: JsonValue | null): value is HeadPayload {
     (value.oid === undefined || typeof value.oid === "string") &&
     (value.unborn === undefined || typeof value.unborn === "boolean")
   );
-}
-
-function isStorageModePayload(value: JsonValue | null): value is StorageModePayload {
-  return isJsonObject(value) && typeof value.mode === "string";
 }
 
 export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
@@ -115,10 +107,6 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     return json({ owner, repos });
   });
 
-  // Both /hydrate and /compact resolve to the same compaction handler.
-  // The /hydrate alias is preserved for backward compatibility with existing tooling.
-  router.delete(`/:owner/:repo/admin/hydrate`, handleCompatCompactionDelete);
-  router.post(`/:owner/:repo/admin/hydrate`, handleCompatCompactionPost);
   router.delete(`/:owner/:repo/admin/compact`, handleCompatCompactionDelete);
   router.post(`/:owner/:repo/admin/compact`, handleCompatCompactionPost);
 
@@ -236,65 +224,6 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
       return json(state);
     } catch {
       return json({});
-    }
-  });
-
-  router.get(`/:owner/:repo/admin/storage-mode`, async (request, env: Env) => {
-    const { owner, repo } = request.params as { owner: string; repo: string };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      return json(await stub.getRepoStorageModeControl(), 200, { "Cache-Control": "no-cache" });
-    } catch (error) {
-      return json({ error: String(error) }, 500);
-    }
-  });
-
-  router.put(`/:owner/:repo/admin/storage-mode`, async (request, env: Env) => {
-    const { owner, repo } = request.params as { owner: string; repo: string };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const body = await safeParseJsonRequest(request);
-    if (!isStorageModePayload(body)) {
-      return new Response("Invalid storage mode payload\n", { status: 400 });
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const result = await stub.setRepoStorageModeGuarded(body.mode);
-      const status =
-        result.status === "ok" ? 200 : result.status === "unsupported_target_mode" ? 400 : 409;
-      return json(result, status, { "Cache-Control": "no-cache" });
-    } catch (error) {
-      return json({ error: String(error) }, 500);
-    }
-  });
-
-  router.post(`/:owner/:repo/admin/storage-mode/backfill`, async (request, env: Env) => {
-    const { owner, repo } = request.params as { owner: string; repo: string };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-
-    const repoId = repoKey(owner, repo);
-    const stub = getRepoStub(env, repoId);
-    try {
-      const result = await stub.requestLegacyCompatBackfill();
-      if (result.status === "queued" && result.shouldEnqueue) {
-        await env.REPO_MAINT_QUEUE.send({
-          kind: "legacy-backfill",
-          repoId,
-          jobId: result.jobId,
-          targetPacksetVersion: result.targetPacksetVersion,
-        });
-      }
-      return json(result, result.status === "queued" ? 202 : 200, {
-        "Cache-Control": "no-cache",
-      });
-    } catch (error) {
-      return json({ error: String(error) }, 500);
     }
   });
 

@@ -247,17 +247,6 @@ export async function handleCompactionMessage(
       },
     });
 
-    if (commit.status === "ineligible") {
-      await cleanupStagedCompaction({
-        stagedUpload,
-        log,
-        reason: commit.reason,
-      });
-      leaseToken = undefined;
-      message.ack();
-      return;
-    }
-
     if (commit.status === "retry") {
       await cleanupStagedCompaction({
         stagedUpload,

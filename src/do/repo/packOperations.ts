@@ -5,12 +5,8 @@
  * removal of specific packs and complete repository purging.
  */
 
-import type { RepoStateSchema } from "./repoState.ts";
-
 import { createLogger } from "@/common";
 import { doPrefix, packIndexKey } from "@/keys.ts";
-import { asTypedStorage } from "./repoState.ts";
-import { removePackFromList } from "./packs.ts";
 import {
   deletePackCatalogRows,
   getDb,
@@ -63,15 +59,7 @@ export async function removePack(
     const db = getDb(ctx.storage);
 
     if (!packKey.startsWith(prefix)) {
-      const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-      const packList = (await store.get("packList")) || [];
-      const matchingKey = packList.find((k) => k.endsWith(packKey) || k.endsWith(`/${packKey}`));
-
-      if (matchingKey) {
-        fullPackKey = matchingKey;
-      } else {
-        fullPackKey = `${prefix}/objects/pack/${packKey}`;
-      }
+      fullPackKey = `${prefix}/objects/pack/${packKey}`;
     }
 
     if ((await getPackCatalogCount(db)) === 0) {
@@ -120,11 +108,8 @@ export async function removePack(
       log.debug("no-index-to-delete", { key: indexKey });
     }
 
-    // Remove from DO metadata. The legacy mirrors and deprecated pack_objects
-    // table still need cleanup during the rollout window, but the pack catalog
-    // remains the authoritative state machine.
+    // Remove from pack catalog metadata
     await deletePackCatalogRows(db, [fullPackKey]);
-    await removePackFromList(ctx, fullPackKey);
     result.deletedMetadata = true;
 
     result.removed = result.deletedPack || result.deletedMetadata;

@@ -4,12 +4,7 @@ import type { DebugStateSnapshot } from "./types.ts";
 import { asTypedStorage } from "../repoState.ts";
 import { doPrefix, r2LooseKey } from "@/keys.ts";
 import { getDb, listPackCatalog } from "../db/index.ts";
-import {
-  activeLeaseOrUndefined,
-  getActivePackCatalogSnapshot,
-  getRollbackCompatControlFromStore,
-  getRepoStorageModeValue,
-} from "../catalog.ts";
+import { activeLeaseOrUndefined, getActivePackCatalogSnapshot } from "../catalog.ts";
 import { toDebugPackState } from "./types.ts";
 
 async function listLooseSample(ctx: DurableObjectState): Promise<string[]> {
@@ -67,7 +62,6 @@ export async function debugState(ctx: DurableObjectState, env: Env): Promise<Deb
   const receiveLease = activeLeaseOrUndefined(await store.get("receiveLease"), now);
   const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), now);
   const compactionWantedAt = await store.get("compactionWantedAt");
-  const rollbackCompat = await getRollbackCompatControlFromStore(store);
 
   const looseSample = await listLooseSample(ctx);
   const dbSizeBytes = getDatabaseSize(ctx);
@@ -79,14 +73,9 @@ export async function debugState(ctx: DurableObjectState, env: Env): Promise<Deb
 
   return {
     meta: { doId: ctx.id.toString(), prefix },
-    repoStorageMode: await getRepoStorageModeValue(ctx),
     head,
     refsCount: refs.length,
     refs: refs.slice(0, 20),
-    lastPackKey: activePacks[0]?.key || null,
-    lastPackOidsCount: undefined,
-    packListCount: activePacks.length,
-    packList: activePacks.map((pack) => pack.key),
     packStats: packStats.length > 0 ? packStats : undefined,
     activePacks,
     supersededPacks,
@@ -99,27 +88,10 @@ export async function debugState(ctx: DurableObjectState, env: Env): Promise<Deb
       wantedAt: compactionWantedAt,
       lease: compactLease,
     },
-    rollbackCompat,
-    unpackWork: null,
-    unpackNext: null,
     looseSample,
-    hydrationPackCount: activePacks.filter((pack) => pack.kind === "compact").length,
-    lastMaintenanceMs: await store.get("lastMaintenanceMs"),
     dbSizeBytes,
     looseR2SampleBytes,
     looseR2SampleCount,
     looseR2Truncated,
-    hydration: {
-      running: !!receiveLease || !!compactLease,
-      stage: receiveLease
-        ? "receiving"
-        : compactLease
-          ? "compacting"
-          : compactionWantedAt
-            ? "queued"
-            : undefined,
-      queued: typeof compactionWantedAt === "number" ? 1 : 0,
-      startedAt: receiveLease?.createdAt ?? compactLease?.createdAt,
-    },
   };
 }

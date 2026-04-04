@@ -7,7 +7,7 @@ import { COMPACTION_REARM_DELAY_MS } from "./catalog/shared.ts";
 
 /**
  * Plan the next alarm time purely from existing DO state and repo config.
- * Priority: unpack > hydration > min(idle, maintenance).
+ * Priority: compaction wake/retry, then idle cleanup.
  */
 export async function planNextAlarm(
   state: DurableObjectState,
@@ -15,109 +15,48 @@ export async function planNextAlarm(
   now = Date.now()
 ): Promise<{
   when: number;
-  reason: "unpack" | "hydration" | "compaction" | "idle" | "maint";
+  reason: "compaction" | "idle";
 } | null> {
   const log = createLogger(env.LOG_LEVEL, { service: "Scheduler", doId: state.id.toString() });
   const store = asTypedStorage<RepoStateSchema>(state.storage);
   const cfg = getConfig(env);
-  const repoStorageMode = (await store.get("repoStorageMode")) || "legacy";
 
-  // 1) Streaming repos re-arm compaction via alarms and ignore stale legacy
-  // unpack/hydration state. Legacy repos keep the old order.
-  if (repoStorageMode === "streaming") {
-    try {
-      const [compactionWantedAt, receiveLease, compactLease] = await Promise.all([
-        store.get("compactionWantedAt"),
-        store.get("receiveLease"),
-        store.get("compactLease"),
-      ]);
+  // 1) Re-arm compaction via alarms when a compaction request or lease is active.
+  try {
+    const [compactionWantedAt, receiveLease, compactLease] = await Promise.all([
+      store.get("compactionWantedAt"),
+      store.get("receiveLease"),
+      store.get("compactLease"),
+    ]);
 
-      const activeReceiveLease = activeLeaseOrUndefined(receiveLease, now);
-      if (activeReceiveLease) {
-        return { when: activeReceiveLease.expiresAt, reason: "compaction" };
-      }
-
-      const activeCompactLease = activeLeaseOrUndefined(compactLease, now);
-      if (activeCompactLease) {
-        return { when: activeCompactLease.expiresAt, reason: "compaction" };
-      }
-
-      if (typeof compactionWantedAt === "number") {
-        return { when: now + COMPACTION_REARM_DELAY_MS, reason: "compaction" };
-      }
-    } catch (e) {
-      log.warn("sched:read-compaction-state-failed", { error: String(e) });
-    }
-  } else {
-    // 1) Unpack has highest priority
-    try {
-      const [unpackWork, unpackNext] = await Promise.all([
-        store.get("unpackWork"),
-        store.get("unpackNext"),
-      ]);
-      if (unpackWork || unpackNext) {
-        return { when: now + cfg.unpackDelayMs, reason: "unpack" };
-      }
-    } catch (e) {
-      log.warn("sched:read-unpack-state-failed", { error: String(e) });
-      // Continue to check hydration/idle
+    const activeReceiveLease = activeLeaseOrUndefined(receiveLease, now);
+    if (activeReceiveLease) {
+      return { when: activeReceiveLease.expiresAt, reason: "compaction" };
     }
 
-    // 2) Hydration next
-    try {
-      const [hydrWork, hydrQueue] = await Promise.all([
-        store.get("hydrationWork"),
-        store.get("hydrationQueue"),
-      ]);
-      const hasQueue = Array.isArray(hydrQueue) ? hydrQueue.length > 0 : !!hydrQueue;
-
-      // Hydration scheduling:
-      // - If stage is 'error': terminal, require manual intervention; do not auto-schedule hydration
-      // - Else if nextRetryAt is set in error: schedule exactly at that time (fixed interval)
-      // - Else: schedule soon using unpackDelayMs as slice cadence
-      if (hydrWork) {
-        if (hydrWork.stage === "error") {
-          const fatal = !!hydrWork.error?.fatal;
-          log.warn(fatal ? "sched:hydration-fatal-error" : "sched:hydration-terminal-error", {
-            message: hydrWork.error?.message,
-          });
-          // Do not schedule hydration automatically; continue to idle/maintenance planning
-        } else {
-          const nextRetryAt = hydrWork.error?.nextRetryAt;
-          if (typeof nextRetryAt === "number" && nextRetryAt > now) {
-            return { when: nextRetryAt, reason: "hydration" };
-          }
-          // Work in progress or immediate retry allowed
-          return { when: now + cfg.unpackDelayMs, reason: "hydration" };
-        }
-      } else if (hasQueue) {
-        // Queue has work but no active work
-        return { when: now + cfg.unpackDelayMs, reason: "hydration" };
-      }
-    } catch (e) {
-      log.warn("sched:read-hydration-state-failed", { error: String(e) });
-      // Continue to idle/maintenance fallback
+    const activeCompactLease = activeLeaseOrUndefined(compactLease, now);
+    if (activeCompactLease) {
+      return { when: activeCompactLease.expiresAt, reason: "compaction" };
     }
+
+    if (typeof compactionWantedAt === "number") {
+      return { when: now + COMPACTION_REARM_DELAY_MS, reason: "compaction" };
+    }
+  } catch (e) {
+    log.warn("sched:read-compaction-state-failed", { error: String(e) });
   }
 
-  // 3) Idle / Maintenance planning
+  // 2) Idle cleanup planning
   try {
-    const [lastAccess, lastMaint] = await Promise.all([
-      store.get("lastAccessMs"),
-      store.get("lastMaintenanceMs"),
-    ]);
-    // Guard against past deadlines (e.g., host slept). If an idle/maintenance
+    const lastAccess = await store.get("lastAccessMs");
+    // Guard against past deadlines (e.g., host slept). If an idle
     // deadline is already in the past, push it forward by its interval so we
     // do not immediately re-schedule and tight-loop alarms.
     const nextIdleAt = (lastAccess ?? now) + cfg.idleMs;
-    const nextMaintAt = (lastMaint ?? now) + cfg.maintMs;
-    const candidateIdle = nextIdleAt <= now ? now + cfg.idleMs : nextIdleAt;
-    const candidateMaint = nextMaintAt <= now ? now + cfg.maintMs : nextMaintAt;
-    const when = Math.min(candidateIdle, candidateMaint);
-    const reason = candidateMaint <= candidateIdle ? "maint" : "idle";
-    return { when, reason };
+    const when = nextIdleAt <= now ? now + cfg.idleMs : nextIdleAt;
+    return { when, reason: "idle" };
   } catch (e) {
-    log.error("sched:plan-idle-maint-failed", { error: String(e) });
+    log.error("sched:plan-idle-failed", { error: String(e) });
     return null;
   }
 }
@@ -168,7 +107,7 @@ export async function ensureScheduled(
 ): Promise<{
   scheduled: boolean;
   when?: number;
-  reason?: "unpack" | "hydration" | "compaction" | "idle" | "maint";
+  reason?: "compaction" | "idle";
 }> {
   const log = createLogger(env.LOG_LEVEL, { service: "Scheduler", doId: state.id.toString() });
   try {

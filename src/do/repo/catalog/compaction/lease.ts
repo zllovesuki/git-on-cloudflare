@@ -25,7 +25,6 @@ import {
   COMPACTION_REARM_DELAY_MS,
   ensureRepoMetadataDefaults,
   LEASE_RETRY_AFTER_SECONDS,
-  mirrorLegacyPackKeys,
 } from "../shared.ts";
 import { activeLeaseOrUndefined } from "../activity.ts";
 import {
@@ -41,9 +40,9 @@ import {
 /**
  * Acquire a compaction lease and select source packs for compaction.
  *
- * Rejects when: the repo is not in streaming mode, no compaction request is
- * recorded, a receive or compaction lease is already active, or the active
- * catalog is already within the compaction policy.
+ * Rejects when: no compaction request is recorded, a receive or compaction
+ * lease is already active, or the active catalog is already within the
+ * compaction policy.
  */
 export async function beginCompactionState(args: {
   ctx: DurableObjectState;
@@ -53,23 +52,13 @@ export async function beginCompactionState(args: {
 }): Promise<BeginCompactionResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
   await clearExpiredLeases(args.ctx, args.logger);
-  const currentMode = await ensureRepoMetadataDefaults(store);
-  if (currentMode !== "streaming") {
-    return {
-      ok: false,
-      status: "ineligible",
-      currentMode,
-      reason: "mode-mismatch",
-      message: "Background compaction is only available in streaming mode.",
-    };
-  }
+  await ensureRepoMetadataDefaults(store);
 
   const wantedAt = await store.get("compactionWantedAt");
   if (typeof wantedAt !== "number") {
     return {
       ok: false,
       status: "no_work",
-      currentMode,
       reason: "not-requested",
       message: "No compaction request is currently recorded for this repository.",
     };
@@ -81,7 +70,6 @@ export async function beginCompactionState(args: {
     return {
       ok: false,
       status: "busy",
-      currentMode,
       retryAfter: LEASE_RETRY_AFTER_SECONDS,
       reason: "receive-active",
       message: "A receive lease is active, so compaction must retry later.",
@@ -93,7 +81,6 @@ export async function beginCompactionState(args: {
     return {
       ok: false,
       status: "busy",
-      currentMode,
       retryAfter: LEASE_RETRY_AFTER_SECONDS,
       reason: "compact-active",
       message: "A compaction lease is already active for this repository.",
@@ -110,13 +97,11 @@ export async function beginCompactionState(args: {
   if (!plan) {
     await store.delete("compactionWantedAt");
     args.logger?.info("compaction:begin-no-work", {
-      currentMode,
       reason: "below-threshold",
     });
     return {
       ok: false,
       status: "no_work",
-      currentMode,
       reason: "below-threshold",
       message: "The active pack catalog is already within the compaction policy.",
     };
@@ -130,7 +115,6 @@ export async function beginCompactionState(args: {
   await store.put("compactLease", lease);
 
   args.logger?.info("compaction:begin", {
-    currentMode,
     leaseToken: lease.token,
     sourceTier: plan.sourceTier,
     targetTier: plan.targetTier,
@@ -138,7 +122,6 @@ export async function beginCompactionState(args: {
   });
   return {
     ok: true,
-    currentMode,
     lease,
     packsetVersion: (await store.get("packsetVersion")) || 0,
     activeCatalog,
@@ -171,22 +154,12 @@ export async function commitCompactionState(args: {
   logger?: Logger;
 }): Promise<CommitCompactionResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
-  const currentMode = await ensureRepoMetadataDefaults(store);
-  if (currentMode !== "streaming") {
-    await store.delete("compactLease");
-    return {
-      status: "ineligible",
-      currentMode,
-      reason: "mode-mismatch",
-      message: "Background compaction is only available in streaming mode.",
-    };
-  }
+  await ensureRepoMetadataDefaults(store);
 
   const lease = await store.get("compactLease");
   if (!lease || lease.token !== args.token) {
     return {
       status: "retry",
-      currentMode,
       reason: "lease-mismatch",
       message: "Compaction lease is no longer active for this request.",
     };
@@ -197,7 +170,6 @@ export async function commitCompactionState(args: {
     await store.delete("compactLease");
     return {
       status: "retry",
-      currentMode,
       reason: "receive-active",
       message: "A receive lease became active before compaction could commit.",
     };
@@ -208,7 +180,6 @@ export async function commitCompactionState(args: {
     await store.delete("compactLease");
     return {
       status: "retry",
-      currentMode,
       reason: "packset-changed",
       message: "The active pack catalog changed before compaction could commit.",
     };
@@ -224,7 +195,6 @@ export async function commitCompactionState(args: {
     await store.delete("compactLease");
     return {
       status: "retry",
-      currentMode,
       reason: "source-changed",
       message: "One or more source packs changed before compaction could commit.",
     };
@@ -258,7 +228,6 @@ export async function commitCompactionState(args: {
 
   const activeCatalog = await listActivePackCatalog(db);
   const nextPackCatalogVersion = await bumpPacksetVersion(store);
-  await mirrorLegacyPackKeys(store, activeCatalog);
 
   const shouldRequeue = catalogNeedsCompaction(activeCatalog);
   if (shouldRequeue) {
@@ -277,7 +246,6 @@ export async function commitCompactionState(args: {
   });
   return {
     status: "committed",
-    currentMode,
     packCatalogVersion: nextPackCatalogVersion,
     shouldRequeue,
     supersededPackKeys: args.sourcePacks.map((row) => row.packKey),
@@ -296,8 +264,7 @@ export async function rearmCompactionQueueFromAlarm(args: {
   logger?: Logger;
 }): Promise<boolean> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
-  const currentMode = await ensureRepoMetadataDefaults(store);
-  if (currentMode !== "streaming") return false;
+  await ensureRepoMetadataDefaults(store);
 
   const wantedAt = await store.get("compactionWantedAt");
   if (typeof wantedAt !== "number") return false;

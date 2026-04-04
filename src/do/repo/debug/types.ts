@@ -1,6 +1,5 @@
 import type { Head, RepoLease } from "../repoState.ts";
 import type { PackCatalogRow } from "../db/schema.ts";
-import type { RollbackCompatControl } from "@/contracts/repoStorageMode.ts";
 
 export type DebugPackState = {
   key: string;
@@ -25,40 +24,22 @@ export type DebugCompactionState = {
   lease?: RepoLease;
 };
 
-export type DebugRollbackCompatState = RollbackCompatControl;
-
 export type DebugStateSnapshot = {
   meta: { doId: string; prefix: string };
-  repoStorageMode: string;
   head?: Head;
   refsCount: number;
   refs: { name: string; oid: string }[];
-  lastPackKey: string | null;
-  lastPackOidsCount?: number;
-  packListCount: number;
-  packList: string[];
   packStats?: DebugPackState[];
   activePacks: DebugPackState[];
   supersededPacks: DebugPackState[];
   packCatalogVersion: number;
   receiveLease?: RepoLease;
   compaction: DebugCompactionState;
-  rollbackCompat: DebugRollbackCompatState;
-  unpackWork: null;
-  unpackNext: null;
   looseSample: string[];
-  hydrationPackCount: number;
-  lastMaintenanceMs?: number;
   dbSizeBytes?: number;
   looseR2SampleBytes?: number;
   looseR2SampleCount?: number;
   looseR2Truncated?: boolean;
-  hydration: {
-    running: boolean;
-    stage?: string;
-    queued: number;
-    startedAt?: number;
-  };
 };
 
 export type DebugCommitCheck = {

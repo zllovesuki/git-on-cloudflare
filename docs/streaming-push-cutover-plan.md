@@ -1,5 +1,7 @@
 # Phase 5: Streaming-by-Default Cutover With Legacy Rollback Window
 
+> **Historical document.** The cutover described here has been completed and the closure release has removed all legacy code paths. This plan is preserved for historical context only. See `MIGRATION-STREAMING-PUSH.md` for current deployment guidance and `docs/streaming-push-closure-plan.md` for the closure implementation plan.
+
 ## Context
 
 Phases 1-4 of the streaming push migration are landed. The pack-first object store, streaming receive, and queue-driven compaction are all operational.

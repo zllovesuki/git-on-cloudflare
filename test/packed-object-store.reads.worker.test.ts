@@ -37,8 +37,6 @@ describe("packed object store reads", () => {
       expect(legacy?.payload).toEqual(packed?.payload);
     }
 
-    await callStubWithRetry(seededStub, (stub) => stub.setRepoStorageMode("streaming"));
-
     await runDOWithRetry(seededStub, async (_instance, state) => {
       for (const oid of objectOids) await state.storage.delete(objKey(oid));
     });
@@ -59,8 +57,6 @@ describe("packed object store reads", () => {
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
     const { getStub: seededStub, blob } = await seedPackedRepo({ env, repoId, getStub });
-
-    await callStubWithRetry(seededStub, (stub) => stub.setRepoStorageMode("streaming"));
 
     const res = await SELF.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${encodeURIComponent(blob.oid)}&name=hello.txt`

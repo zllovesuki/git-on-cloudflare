@@ -15,7 +15,7 @@ import {
 import { encodeGitObject } from "@/git/core/index.ts";
 
 describe("packed object store catalog", () => {
-  it("backfills pack catalog and keeps repo storage mode repo-local", async () => {
+  it("seeds active receive rows for packed repos", async () => {
     const repoId = `o/${uniqueRepoId("pack-catalog")}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
@@ -23,17 +23,11 @@ describe("packed object store catalog", () => {
 
     const catalog = await callStubWithRetry(seededStub, (stub) => stub.getActivePackCatalog());
     expect(catalog.length).toBe(1);
-    expect(catalog[0]?.kind).toBe("legacy");
+    expect(catalog[0]?.kind).toBe("receive");
     expect(catalog[0]?.state).toBe("active");
     expect(catalog[0]?.objectCount).toBe(4);
     expect(catalog[0]?.packBytes).toBeGreaterThan(0);
     expect(catalog[0]?.idxBytes).toBeGreaterThan(0);
-
-    expect(await callStubWithRetry(seededStub, (stub) => stub.getRepoStorageMode())).toBe("legacy");
-    await callStubWithRetry(seededStub, (stub) => stub.setRepoStorageMode("streaming"));
-    expect(await callStubWithRetry(seededStub, (stub) => stub.getRepoStorageMode())).toBe(
-      "streaming"
-    );
   });
 
   it("repeated catalog snapshots stay read-only after initial seed", async () => {
@@ -89,23 +83,23 @@ describe("packed object store catalog", () => {
       seededStub,
       async (_instance: RepoDurableObject, state: DurableObjectState) => {
         const db = getDb(state.storage);
-        await supersedePackCatalogRows(db, [packKeys[0]], packKeys[1] || null);
+        await supersedePackCatalogRows(db, [packKeys[1]], packKeys[0] || null);
       }
     );
 
     const beforeSnapshot = await readRepoCatalogState(seededStub);
-    expect(beforeSnapshot.activeCatalog.map((row) => row.packKey)).toEqual([packKeys[1]]);
-    expect(beforeSnapshot.catalog.find((row) => row.packKey === packKeys[0])?.state).toBe(
+    expect(beforeSnapshot.activeCatalog.map((row) => row.packKey)).toEqual([packKeys[0]]);
+    expect(beforeSnapshot.catalog.find((row) => row.packKey === packKeys[1])?.state).toBe(
       "superseded"
     );
 
     const snapshot = await callStubWithRetry(seededStub, (stub) => stub.getActivePackCatalog());
     const afterSnapshot = await readRepoCatalogState(seededStub);
 
-    expect(snapshot.map((row) => row.packKey)).toEqual([packKeys[1]]);
+    expect(snapshot.map((row) => row.packKey)).toEqual([packKeys[0]]);
     expect(afterSnapshot.packsetVersion).toBe(beforeSnapshot.packsetVersion);
     expect(afterSnapshot.nextPackSeq).toBe(beforeSnapshot.nextPackSeq);
-    expect(afterSnapshot.catalog.find((row) => row.packKey === packKeys[0])?.state).toBe(
+    expect(afterSnapshot.catalog.find((row) => row.packKey === packKeys[1])?.state).toBe(
       "superseded"
     );
   });

@@ -69,6 +69,9 @@ describe("packed object store deltas", () => {
       },
     ]);
 
+    // Pass packs newest-first to match production catalog chronology. The
+    // helper indexes them oldest-to-newest so the base pack is still visible
+    // when the newer REF_DELTA pack is indexed.
     const { getStub: seededStub, packKeys } = await seedLegacyPackedRepo({
       env,
       repoId,

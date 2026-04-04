@@ -9,7 +9,6 @@ import type { RepoAdminProps } from "./types";
 import { useRepoAdminActions } from "./useRepoAdminActions";
 import { RepoOverviewCard } from "./RepoOverviewCard";
 import { CompactionCard } from "./CompactionCard";
-import { StorageModeCard } from "./StorageModeCard";
 import { PackFilesCard } from "./PackFilesCard";
 import { RefsCard } from "./RefsCard";
 import { DebugToolsCard } from "./DebugToolsCard";
@@ -25,25 +24,18 @@ export function RepoAdminIsland(props: RepoAdminProps) {
     packCount,
     packList,
     state,
-    storageModeControl,
     defaultBranch,
     compactionStatus,
     compactionStartedAt,
     compactionData,
     supersededPackCount,
-    nextMaintenanceIn,
-    nextMaintenanceAt,
   } = props;
 
   const {
     compactionResult,
-    storageModeResult,
-    backfillResult,
     oidResult,
     stateDump,
     pending,
-    setStorageMode,
-    requestLegacyCompatBackfill,
     startCompaction,
     clearCompaction,
     removePack,
@@ -73,21 +65,10 @@ export function RepoAdminIsland(props: RepoAdminProps) {
         packCount={packCount}
         supersededPackCount={supersededPackCount}
         compactionStatus={compactionStatus}
-        nextMaintenanceIn={nextMaintenanceIn}
-        nextMaintenanceAt={nextMaintenanceAt}
         state={state}
         head={head}
         branchCount={branchCount}
         tagCount={tagCount}
-      />
-
-      <StorageModeCard
-        control={storageModeControl}
-        result={storageModeResult}
-        backfillResult={backfillResult}
-        pending={pending}
-        setStorageMode={setStorageMode}
-        requestLegacyCompatBackfill={requestLegacyCompatBackfill}
       />
 
       <CompactionCard

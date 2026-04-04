@@ -271,20 +271,6 @@ export async function handleStreamingReceivePackPOST(
     });
   }
 
-  if (begin.repoStorageMode !== "streaming") {
-    countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
-    await stub.abortReceive(begin.lease.token).catch(() => {});
-    log.warn("receive:mode-mismatch", {
-      expectedMode: "streaming",
-      currentMode: begin.repoStorageMode,
-    });
-    logReceiveEnd(log, 409, { reason: "mode-mismatch" });
-    return new Response("Repository is not currently configured for streaming receive.\n", {
-      status: 409,
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-    });
-  }
-
   let pipelineStarted = false;
   try {
     const { lines, bytesConsumed, packStream } = await readPktSectionStream(request.body);

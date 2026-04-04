@@ -6,9 +6,14 @@ import { concatChunks, encodeGitObject } from "@/git/core/index.ts";
 import { hexToBytes } from "@/common/index.ts";
 import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
 import { doPrefix, r2LooseKey, r2PackKey } from "@/keys.ts";
-import { getDb, listActivePackCatalog, listPackCatalog } from "@/do/repo/db/index.ts";
-import { indexPackOnly } from "@/git/pack/index.ts";
+import {
+  getDb,
+  listActivePackCatalog,
+  listPackCatalog,
+  upsertPackCatalogRow,
+} from "@/do/repo/db/index.ts";
 import { buildPack } from "./git-pack.ts";
+import { indexTestPack } from "./test-indexer.ts";
 import { runDOWithRetry } from "./do-retry.ts";
 
 export type EncodedGitObject = Awaited<ReturnType<typeof encodeGitObject>>;
@@ -54,7 +59,7 @@ export function buildTreePayload(entries: TreeEntry[]): Uint8Array {
   return concatChunks(parts);
 }
 
-export async function seedLegacyPackedRepo(
+export async function seedPackedRepoState(
   args: SeedLegacyPackedRepoArgs
 ): Promise<{ getStub: () => DurableObjectStub<RepoDurableObject>; packKeys: string[] }> {
   const packKeys: string[] = [];
@@ -62,7 +67,11 @@ export async function seedLegacyPackedRepo(
   await runDOWithRetry(args.getStub, async (_instance, state) => {
     const prefix = doPrefix(state.id.toString());
     const store = asTypedStorage<RepoStateSchema>(state.storage);
-    let lastPackOids: string[] = [];
+    const db = getDb(state.storage);
+    const packSpecs = args.packs.map((pack) => ({
+      ...pack,
+      packKey: r2PackKey(prefix, pack.name),
+    }));
 
     for (const obj of args.looseObjects ?? []) {
       await store.put(objKey(obj.oid), obj.zdata);
@@ -71,28 +80,61 @@ export async function seedLegacyPackedRepo(
       }
     }
 
-    for (let i = 0; i < args.packs.length; i++) {
-      const pack = args.packs[i];
-      const packKey = r2PackKey(prefix, pack.name);
-      packKeys.push(packKey);
-      await args.env.REPO_BUCKET.put(packKey, pack.packBytes);
-      const oids = await indexPackOnly(pack.packBytes, args.env, packKey, state, prefix);
-      if (i === 0) lastPackOids = oids;
+    for (const pack of packSpecs) {
+      packKeys.push(pack.packKey);
     }
 
-    if (packKeys.length === 0) throw new Error("seedLegacyPackedRepo requires at least one pack");
+    let nextSeq = (await store.get("nextPackSeq")) || 1;
+    const catalogSoFar: import("@/do/repo/db/schema.ts").PackCatalogRow[] = [];
+    // Historical test helpers passed packs newest-first because `packList`
+    // mirrored that ordering. Preserve that caller contract for assertions and
+    // returned `packKeys`, but index oldest-to-newest so REF_DELTA bases in
+    // older packs are visible while newer packs are being indexed.
+    for (const pack of [...packSpecs].reverse()) {
+      await args.env.REPO_BUCKET.put(pack.packKey, pack.packBytes);
 
-    const newestPackKey = packKeys[0];
-    if (!newestPackKey) throw new Error("missing newest pack key");
-    await store.put("lastPackKey", newestPackKey);
-    await store.put("lastPackOids", lastPackOids);
-    await store.put("packList", packKeys);
+      // Pass already-indexed packs so REF_DELTA bases in earlier packs can be resolved
+      const resolveResult = await indexTestPack(
+        args.env,
+        pack.packKey,
+        pack.packBytes.byteLength,
+        catalogSoFar.length > 0 ? catalogSoFar : undefined
+      );
+
+      const seq = nextSeq++;
+      const row: import("@/do/repo/db/schema.ts").PackCatalogRow = {
+        packKey: pack.packKey,
+        kind: "receive",
+        state: "active",
+        tier: 0,
+        seqLo: seq,
+        seqHi: seq,
+        objectCount: resolveResult.objectCount,
+        packBytes: pack.packBytes.byteLength,
+        idxBytes: resolveResult.idxBytes,
+        createdAt: Date.now(),
+        supersededBy: null,
+      };
+      await upsertPackCatalogRow(db, row);
+      catalogSoFar.push(row);
+    }
+
+    if (packKeys.length === 0) throw new Error("seedPackedRepoState requires at least one pack");
+
+    // Bump packset version and persist next sequence number
+    const packsetVersion = ((await store.get("packsetVersion")) || 0) + 1;
+    await store.put("packsetVersion", packsetVersion);
+    await store.put("nextPackSeq", nextSeq);
+
     if (args.refs) await store.put("refs", args.refs);
     if (args.head) await store.put("head", args.head);
   });
 
   return { getStub: args.getStub, packKeys };
 }
+
+/** @deprecated Alias for backward compatibility during migration */
+export const seedLegacyPackedRepo = seedPackedRepoState;
 
 type SeedPackedRepoArgs = {
   env: Env;
@@ -149,7 +191,7 @@ export async function seedPackedRepo(
     { type: "tag", payload: tagPayload },
   ]);
 
-  const seeded = await seedLegacyPackedRepo({
+  const seeded = await seedPackedRepoState({
     env: args.env,
     repoId: args.repoId,
     getStub: args.getStub,
@@ -231,7 +273,7 @@ export async function deleteLooseObjectCopies(
 }
 
 /**
- * Build a pack from raw payloads, upload to R2, and register in the DO catalog.
+ * Build a pack from raw payloads, upload to R2, index, and register in pack_catalog.
  * Use this to make loose-only test objects readable via the pack-first read path.
  */
 export async function registerTestPack(args: {
@@ -246,15 +288,32 @@ export async function registerTestPack(args: {
   let packKey = "";
   await runDOWithRetry(args.getStub, async (_instance, state) => {
     const prefix = doPrefix(state.id.toString());
+    const store = asTypedStorage<RepoStateSchema>(state.storage);
+    const db = getDb(state.storage);
+
     packKey = r2PackKey(prefix, args.packName);
     await args.env.REPO_BUCKET.put(packKey, packBytes);
-    const oids = await indexPackOnly(packBytes, args.env, packKey, state, prefix);
-    const store = asTypedStorage<RepoStateSchema>(state.storage);
-    const existing = ((await store.get("packList")) || []) as string[];
-    existing.unshift(packKey);
-    await store.put("packList", existing);
-    await store.put("lastPackKey", packKey);
-    await store.put("lastPackOids", oids);
+
+    const resolveResult = await indexTestPack(args.env, packKey, packBytes.byteLength);
+
+    const seq = (await store.get("nextPackSeq")) || 1;
+    await upsertPackCatalogRow(db, {
+      packKey,
+      kind: "receive",
+      state: "active",
+      tier: 0,
+      seqLo: seq,
+      seqHi: seq,
+      objectCount: resolveResult.objectCount,
+      packBytes: packBytes.byteLength,
+      idxBytes: resolveResult.idxBytes,
+      createdAt: Date.now(),
+      supersededBy: null,
+    });
+
+    const packsetVersion = ((await store.get("packsetVersion")) || 0) + 1;
+    await store.put("packsetVersion", packsetVersion);
+    await store.put("nextPackSeq", seq + 1);
   });
 
   return packKey;

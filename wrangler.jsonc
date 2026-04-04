@@ -79,19 +79,8 @@
   },
   // Environment variables (text/JSON)
   "vars": {
-    // Repo DO maintenance windows (minutes)
+    // Repo DO idle cleanup threshold (minutes)
     "REPO_DO_IDLE_MINUTES": "30",
-    "REPO_DO_MAINT_MINUTES": "1440",
-    // Pack retention
-    "REPO_KEEP_PACKS": "10",
-    // Max number of recent pack entries to retain immediately after pushes
-    // (long-term retention will further trim to REPO_KEEP_PACKS during maintenance)
-    "REPO_PACKLIST_MAX": "50",
-    // Background unpack chunking
-    "REPO_UNPACK_CHUNK_SIZE": "100",
-    "REPO_UNPACK_MAX_MS": "2000",
-    "REPO_UNPACK_DELAY_MS": "500",
-    "REPO_UNPACK_BACKOFF_MS": "1000",
     // Logging level: debug|info|warn|error
     "LOG_LEVEL": "info"
   }

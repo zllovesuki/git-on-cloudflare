@@ -7,7 +7,7 @@ import { defineConfig } from "vitest/config";
 
 const AUTH_TEST_FILE = "test/auth.worker.test.ts";
 const OPTIMIZED_DEPS = ["sanitize-html", "postcss", "source-map-js"];
-const INLINE_DEPS = ["isomorphic-git", "@noble/hashes", "pako", ...OPTIMIZED_DEPS];
+const INLINE_DEPS = ["@noble/hashes", "pako", ...OPTIMIZED_DEPS];
 const isAuthSuite =
   process.env.npm_lifecycle_event === "test:auth" ||
   process.argv.some((arg) => arg.includes("auth.worker.test.ts"));

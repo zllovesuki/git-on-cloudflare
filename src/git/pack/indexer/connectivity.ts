@@ -3,8 +3,8 @@
  *
  * Validates that each updated ref's target object is reachable by searching
  * both the newly indexed pack and the existing active pack catalog. Uses the
- * project's pack-first object store (readObject / findObject) instead of
- * isomorphic-git, and avoids buffering the entire pack in memory.
+ * project's pack-first object store (readObject / findObject), and avoids
+ * buffering the entire pack in memory.
  *
  * The key trick: we seed the CacheContext memo with the new pack's catalog row
  * and IdxView so the existing object store automatically searches the new pack

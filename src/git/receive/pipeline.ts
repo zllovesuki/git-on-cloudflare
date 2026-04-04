@@ -326,17 +326,6 @@ export async function executeReceivePipeline(
       );
     }
 
-    if (finalize.status === "mode_mismatch") {
-      await cleanupStagedPack({
-        stagedUpload,
-        log: args.log,
-        reason: "finalize-mode-mismatch",
-        attempt: "inline",
-      });
-      args.log.warn("receive:mode-mismatch", { currentMode: finalize.currentMode });
-      throw new ReceivePipelineHttpError(409, "mode-mismatch", finalize.message);
-    }
-
     if (finalize.status === "ref_conflict") {
       await cleanupStagedPack({
         stagedUpload,
@@ -355,17 +344,6 @@ export async function executeReceivePipeline(
         changed: false,
         empty: false,
       });
-    }
-
-    if (finalize.status !== "committed") {
-      await cleanupStagedPack({
-        stagedUpload,
-        log: args.log,
-        reason: "unexpected-finalize-result",
-        attempt: "inline",
-      });
-      args.log.error("receive:unexpected-finalize-result", { status: finalize.status });
-      throw new Error("Unexpected receive finalization result.");
     }
 
     if (finalize.shouldQueueCompaction) {

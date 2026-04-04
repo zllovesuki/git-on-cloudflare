@@ -8,12 +8,12 @@ import {
   flushPkt,
   concatChunks,
   getHeadAndRefs,
-  inflateAndParseHeader,
-  parseTagTarget,
 } from "@/git";
+import { loadPeeledTagTargets } from "@/git/object-store/index.ts";
 import { handleFetchV2Streaming } from "@/git/operations/uploadStream/index.ts";
 import { handleStreamingReceivePackPOST } from "@/git/receive/streamReceivePack.ts";
-import { asBodyInit, getRepoStub, gunzip, unauthorizedBasic } from "@/common";
+import { asBodyInit, gunzip, unauthorizedBasic } from "@/common";
+import type { CacheContext } from "@/cache/cache.ts";
 import { repoKey } from "@/keys";
 import { verifyAuth } from "@/auth";
 import { addRepoToOwner, removeRepoFromOwner } from "@/registry";
@@ -121,27 +121,16 @@ async function handleUploadPackPOST(
       filteredRefs = refs.filter((r) => refPrefixes.some((p) => r.name.startsWith(p)));
     }
 
-    // Optional peel of annotated tags
+    // Optional peel of annotated tags. The helper batches idx loads and reads
+    // tag entries in pack-offset order so a tag-heavy repo does not turn one
+    // metadata request into one packed-object fetch per tag ref.
     let peeledByRef = new Map<string, string>();
     if (wantPeel) {
       try {
         const tagRefs = filteredRefs.filter((r) => r.name.startsWith("refs/tags/"));
         if (tagRefs.length > 0) {
-          const stub = getRepoStub(env, repoId);
-          const oids = tagRefs.map((r) => r.oid);
-          const objMap = (await stub.getObjectsBatch(oids)) as Map<string, Uint8Array | null>;
-          for (const r of tagRefs) {
-            const z = objMap.get(r.oid);
-            if (!z) continue;
-            const parsed = await inflateAndParseHeader(
-              z instanceof Uint8Array ? z : new Uint8Array(z)
-            );
-            if (!parsed) continue;
-            if (parsed.type === "tag") {
-              const peeled = parseTagTarget(parsed.payload);
-              if (peeled?.targetOid) peeledByRef.set(r.name, peeled.targetOid);
-            }
-          }
+          const cacheCtx: CacheContext = { req: request, ctx };
+          peeledByRef = await loadPeeledTagTargets(env, repoId, tagRefs, cacheCtx);
         }
       } catch {}
     }
@@ -208,53 +197,16 @@ async function handleReceivePackPOST(
   request: Request,
   ctx: ExecutionContext
 ) {
-  const stub = getRepoStub(env, repoId);
-  const repoStorageMode = await stub.getRepoStorageMode().catch(() => "legacy");
-
-  if (repoStorageMode === "streaming") {
-    return await handleStreamingReceivePackPOST(env, repoId, request, ctx, {
-      onRepoStateChanged: async ({ changed, empty }) => {
-        if (!changed) return;
-        const headers = new Headers({
-          "X-Repo-Changed": "1",
-          "X-Repo-Empty": empty ? "1" : "0",
-        });
-        await applyReceiveSideEffects(env, repoId, headers);
-      },
-    });
-  }
-
-  // Forward raw body to the Durable Object /receive endpoint
-  // Preflight: if the DO is currently unpacking and a one-deep queue is already occupied,
-  // return 503 early so clients can retry without uploading the whole pack.
-  try {
-    const j = await stub.getUnpackProgress();
-    const queued = j.queuedCount || 0;
-    if (j.unpacking === true && queued >= 1) {
-      return new Response("Repository is busy unpacking; please retry shortly.\n", {
-        status: 503,
-        headers: {
-          "Retry-After": "10",
-          "Content-Type": "text/plain; charset=utf-8",
-        },
+  return await handleStreamingReceivePackPOST(env, repoId, request, ctx, {
+    onRepoStateChanged: async ({ changed, empty }) => {
+      if (!changed) return;
+      const headers = new Headers({
+        "X-Repo-Changed": "1",
+        "X-Repo-Empty": empty ? "1" : "0",
       });
-    }
-  } catch {}
-  const ct = request.headers.get("Content-Type") || "application/x-git-receive-pack-request";
-  const res = await stub.fetch("https://do/receive", {
-    method: "POST",
-    body: request.body,
-    headers: { "Content-Type": ct },
-    signal: request.signal,
+      await applyReceiveSideEffects(env, repoId, headers);
+    },
   });
-  // Proxy DO response through
-  const headers = new Headers(res.headers);
-  if (!headers.has("Content-Type"))
-    headers.set("Content-Type", "application/x-git-receive-pack-result");
-  headers.set("Cache-Control", "no-cache");
-  // Update owner registry on change signal
-  await applyReceiveSideEffects(env, repoId, headers);
-  return new Response(res.body, { status: res.status, headers });
 }
 
 /**

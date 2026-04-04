@@ -1,6 +1,7 @@
 import { it, expect } from "vitest";
 import { env, runDurableObjectAlarm } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
+import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
 import { runDOWithRetry } from "./util/test-helpers.ts";
 
 function makeRepoId(suffix: string) {
@@ -104,4 +105,90 @@ it("alarm: does not delete a non-empty repo", async () => {
   const listed = await env.REPO_BUCKET.list({ prefix: `${prefix}/objects/pack/` });
   const keys = (listed.objects || []).map((o: any) => o.key);
   expect(keys.some((k: string) => k.endsWith("keep.pack"))).toBe(true);
+});
+
+it("alarm: does not delete repo with no refs but active pack catalog rows", async () => {
+  const repoId = makeRepoId("packs-no-refs");
+  const id = env.REPO_DO.idFromName(repoId);
+  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+
+  // Seed a repo with pack data via seedMinimalRepo (creates refs, head, pack catalog)
+  await runDOWithRetry(getStub, async (instance: RepoDurableObject) => {
+    await instance.seedMinimalRepo();
+  });
+
+  const { prefix } = await runDOWithRetry(
+    getStub,
+    async (_instance: any, state: DurableObjectState) => {
+      const pfx = `do/${state.id.toString()}`;
+      return { prefix: pfx };
+    }
+  );
+
+  // Clear refs and set HEAD unborn, but leave pack_catalog rows intact.
+  // This is the critical case: the repo has data (active packs) but no refs.
+  await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
+    await state.storage.put("refs", []);
+    await state.storage.put("head", { target: "refs/heads/main", unborn: true });
+    await state.storage.put("lastAccessMs", Date.now() - 60 * 60 * 1000);
+  });
+
+  const ran = await (async () => {
+    try {
+      return await runDurableObjectAlarm(getStub());
+    } catch (e) {
+      const msg = String(e || "");
+      if (msg.includes("invalidating this Durable Object")) {
+        return await runDurableObjectAlarm(getStub());
+      }
+      throw e;
+    }
+  })();
+  expect(ran).toBe(true);
+
+  // R2 pack data must survive — active pack catalog rows protect against purge
+  const listed = await env.REPO_BUCKET.list({ prefix: `${prefix}/objects/pack/` });
+  expect((listed.objects || []).length).toBeGreaterThan(0);
+});
+
+it("alarm: re-arms compaction via queue when compactionWantedAt is set", async () => {
+  const repoId = makeRepoId("compact-rearm");
+  const id = env.REPO_DO.idFromName(repoId);
+  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+
+  // Seed a repo so it has refs/head/packs (non-empty, won't idle-purge)
+  await runDOWithRetry(getStub, async (instance: RepoDurableObject) => {
+    await instance.seedMinimalRepo();
+  });
+
+  // Set compactionWantedAt to signal a pending compaction request
+  await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
+    const store = asTypedStorage<RepoStateSchema>(state.storage);
+    await store.put("compactionWantedAt", Date.now());
+    await state.storage.setAlarm(Date.now() + 100);
+  });
+
+  // Fire the alarm — compaction rearm path should dispatch a queue message
+  // and return before reaching the idle cleanup path
+  const ran = await (async () => {
+    try {
+      return await runDurableObjectAlarm(getStub());
+    } catch (e) {
+      const msg = String(e || "");
+      if (msg.includes("invalidating this Durable Object")) {
+        return await runDurableObjectAlarm(getStub());
+      }
+      throw e;
+    }
+  })();
+  expect(ran).toBe(true);
+
+  // compactionWantedAt should still be set (cleared by the queue consumer after
+  // successful compaction, not by the alarm rearm itself)
+  await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
+    const store = asTypedStorage<RepoStateSchema>(state.storage);
+    const wantedAt = await store.get("compactionWantedAt");
+    expect(wantedAt).not.toBeUndefined();
+    expect(typeof wantedAt).toBe("number");
+  });
 });

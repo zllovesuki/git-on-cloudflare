@@ -84,23 +84,24 @@ The CacheContext interface combines Request and ExecutionContext for operations 
 `CacheContext` may include an optional `memo` used to coalesce upstream work and share budgets within a single Worker request:
 
 - `refs?: Map<oid, string[]>` — parsed references for objects (commit → [tree, parents], tree → [entries])
-- `packList?: string[]` and `packListPromise?: Promise<string[]>` — centralized pack discovery results and in-flight coalescing
-- `packOids?: Map<packKey, Set<oid>>` — in-memory membership hints reused within the request
-- `doBatchBudget?: number`, `doBatchDisabled?: boolean` — shared budget for DO batch refs calls across closure phases
+- `repoId?: string` — pins request-scoped memo entries to a single repository
+- `packCatalog?: PackCatalogRow[]` and `packCatalogPromise?: Promise<PackCatalogRow[]>` — active pack catalog snapshot and in-flight coalescing
+- `idxViews?: Map<packKey, IdxView>` and `idxViewPromises?: Map<key, Promise<IdxView | undefined>>` — parsed `.idx` views and in-flight loads
+- `packedObjects?: Map<oid, PackedObjectResult | null>` and `packedObjectPromises?: Map<oid, Promise<PackedObjectResult | undefined>>` — worker-local packed object reads
+- `objects?: Map<oid, { type, payload } | undefined>` — memoized object payloads reused across higher-level readers
 - `subreqBudget?: number` — soft subrequest budget for upstream calls
 - `flags?: Set<string>` — per-request guardrails and log throttles (e.g., `no-cache-read`, `closure-timeout`)
 - `limiter?: { run(label, fn) }` — per-request concurrency limiter for DO/R2 calls
 
 ### Pack discovery and memoization (no KV)
 
-Reads avoid KV entirely. Instead, pack discovery is centralized and memoized per request via `src/git/operations/packDiscovery.ts#getPackCandidates()`:
+Reads avoid KV entirely. Instead, the worker-local object store loads the active pack catalog through `src/git/object-store/catalog.ts#loadActivePackCatalog()` and memoizes that snapshot per request:
 
-- Seeds from the repo Durable Object pack catalog and pack list metadata (newest-first).
-- Falls back to a best-effort R2 listing under the DO pack prefix when DO metadata is unavailable.
+- Reads the authoritative active pack catalog from the repo Durable Object.
 - Coalesces concurrent discovery calls within the same request using a per-request promise in `RequestMemo`.
 - Applies a per-request concurrency limiter and soft subrequest budget to keep DO/R2 calls bounded.
 
-Callers (e.g., `readLooseObjectRaw()` and upload-pack assemblers) reuse the discovered pack list through the same `CacheContext.memo`, avoiding duplicate metadata and listing calls during a request.
+Callers (e.g., `readLooseObjectRaw()` and upload-pack assemblers) reuse the memoized catalog through the same `CacheContext.memo`, avoiding duplicate metadata calls during a request.
 
 ## Performance Impact
 

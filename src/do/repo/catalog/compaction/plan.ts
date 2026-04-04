@@ -1,6 +1,6 @@
 import type { Logger } from "@/common/logger.ts";
 import type { PackCatalogRow } from "../../db/schema.ts";
-import type { RepoLease, RepoStateSchema, RepoStorageMode, TypedStorage } from "../../repoState.ts";
+import type { RepoLease, RepoStateSchema, TypedStorage } from "../../repoState.ts";
 
 import { asTypedStorage } from "../../repoState.ts";
 import { scheduleAlarmIfSooner } from "../../scheduler.ts";
@@ -30,7 +30,6 @@ export type CompactionPlan = {
 export type PreviewCompactionResult = {
   action: "preview";
   status: "ok" | "no_work";
-  currentMode: RepoStorageMode;
   queued: boolean;
   wantedAt?: number;
   activeCatalog: PackCatalogRow[];
@@ -42,15 +41,14 @@ export type PreviewCompactionResult = {
 
 export type RequestCompactionResult = {
   action: "request";
-  status: "queued" | "no_work" | "ineligible";
-  currentMode: RepoStorageMode;
+  status: "queued" | "no_work";
   queued: boolean;
   shouldEnqueue: boolean;
   wantedAt?: number;
   activeCatalog: PackCatalogRow[];
   packCatalogVersion: number;
   plan?: CompactionPlan;
-  reason?: "mode-mismatch" | "below-threshold";
+  reason?: "below-threshold";
   message: string;
 };
 
@@ -63,7 +61,6 @@ export type ClearCompactionRequestResult = {
 export type BeginCompactionResult =
   | {
       ok: true;
-      currentMode: RepoStorageMode;
       lease: RepoLease;
       packsetVersion: number;
       activeCatalog: PackCatalogRow[];
@@ -73,7 +70,6 @@ export type BeginCompactionResult =
   | {
       ok: false;
       status: "busy";
-      currentMode: RepoStorageMode;
       retryAfter: number;
       reason: "receive-active" | "compact-active";
       message: string;
@@ -81,22 +77,13 @@ export type BeginCompactionResult =
   | {
       ok: false;
       status: "no_work";
-      currentMode: RepoStorageMode;
       reason: "not-requested" | "below-threshold";
-      message: string;
-    }
-  | {
-      ok: false;
-      status: "ineligible";
-      currentMode: RepoStorageMode;
-      reason: "mode-mismatch";
       message: string;
     };
 
 export type CommitCompactionResult =
   | {
       status: "committed";
-      currentMode: RepoStorageMode;
       packCatalogVersion: number;
       shouldRequeue: boolean;
       supersededPackKeys: string[];
@@ -104,14 +91,7 @@ export type CommitCompactionResult =
     }
   | {
       status: "retry";
-      currentMode: RepoStorageMode;
       reason: "receive-active" | "lease-mismatch" | "packset-changed" | "source-changed";
-      message: string;
-    }
-  | {
-      status: "ineligible";
-      currentMode: RepoStorageMode;
-      reason: "mode-mismatch";
       message: string;
     };
 
@@ -205,7 +185,7 @@ export async function scheduleCompactionWake(ctx: DurableObjectState, env: Env):
   await scheduleCompactionAlarm(ctx, env, COMPACTION_WAKE_DELAY_MS);
 }
 
-/** Load shared compaction context: storage mode, catalog, plan, and queued state. */
+/** Load shared compaction context: catalog, plan, and queued state. */
 export async function loadCompactionContext(args: {
   ctx: DurableObjectState;
   env: Env;
@@ -213,14 +193,13 @@ export async function loadCompactionContext(args: {
   logger?: Logger;
 }): Promise<{
   store: TypedStorage<RepoStateSchema>;
-  currentMode: RepoStorageMode;
   packCatalogVersion: number;
   wantedAt: number | undefined;
   activeCatalog: PackCatalogRow[];
   plan: CompactionPlan | undefined;
 }> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
-  const currentMode = await ensureRepoMetadataDefaults(store);
+  await ensureRepoMetadataDefaults(store);
   const packCatalogVersion = (await store.get("packsetVersion")) || 0;
   const wantedAt = await store.get("compactionWantedAt");
   const activeCatalog = await getActivePackCatalogSnapshot(
@@ -233,7 +212,6 @@ export async function loadCompactionContext(args: {
 
   return {
     store,
-    currentMode,
     packCatalogVersion,
     wantedAt,
     activeCatalog,

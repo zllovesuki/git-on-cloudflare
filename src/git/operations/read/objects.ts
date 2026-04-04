@@ -42,8 +42,7 @@ export function parseTree(buf: Uint8Array): TreeEntry[] {
 
 /**
  * Pack-first object reader. Reads git objects from the active pack catalog
- * via the worker-local object store. This is the sole read path for all
- * storage modes.
+ * via the worker-local object store.
  */
 export async function readLooseObjectRaw(
   env: Env,

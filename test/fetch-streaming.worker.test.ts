@@ -675,38 +675,4 @@ describe("git fetch streaming (default)", () => {
     expect(firstDataIdx).toBeGreaterThanOrEqual(0);
     expect(firstProgressIdx).toBeLessThan(firstDataIdx);
   });
-
-  it("returns 503 for repository with no packs", async () => {
-    const owner = "o";
-    const repo = uniqueRepoId("empty");
-    const repoId = `${owner}/${repo}`;
-
-    // Create a repository with only loose objects (no packs)
-    const id = env.REPO_DO.idFromName(repoId);
-    const { commitOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => instance.seedMinimalRepo(false) // withPack: false
-    );
-
-    const body = buildFetchBody({ wants: [commitOid], done: true });
-    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-
-    const res = await SELF.fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        "Git-Protocol": "version=2",
-      },
-      body,
-    } as any);
-
-    // Should get 503 Service Unavailable
-    expect(res.status).toBe(503);
-    expect(res.headers.get("Retry-After")).toBe("5");
-    expect(res.headers.get("X-Git-Error")).toBe("repository-not-ready");
-
-    const text = await res.text();
-    expect(text).toContain("Repository not ready for fetch");
-    expect(text).toContain("Objects are being packed");
-  });
 });
