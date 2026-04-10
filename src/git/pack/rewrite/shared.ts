@@ -4,10 +4,11 @@ import type {
 } from "@/git/operations/fetch/types.ts";
 import type { Logger } from "@/common/logger.ts";
 import type { Limiter } from "@/git/operations/limits.ts";
+import type { IdxView } from "@/git/object-store/types.ts";
 import type { PackHeaderEx } from "../packMeta.ts";
 
 import { createLogger } from "@/common/index.ts";
-import { findOidIndex } from "@/git/object-store/index.ts";
+import { findOidIndex, getNextOffsetByIndex } from "@/git/object-store/index.ts";
 import { SequentialReader } from "@/git/pack/indexer/resolve/reader.ts";
 import { readPackHeaderExFromBuf, readPackRange } from "../packMeta.ts";
 
@@ -17,20 +18,12 @@ export const WHOLE_PACK_MAX_BYTES = 8 * 1024 * 1024;
 export const WHOLE_PACK_TOTAL_BUDGET = 32 * 1024 * 1024;
 export const HEADER_STABILITY_CAP = 16;
 
-// ---------------------------------------------------------------------------
-// Options
-// ---------------------------------------------------------------------------
-
 export type RewriteOptions = {
   signal?: AbortSignal;
   limiter?: Limiter;
   countSubrequest?: (n?: number) => boolean | void;
   onProgress?: (msg: string) => void;
 };
-
-// ---------------------------------------------------------------------------
-// SelectionTable — struct-of-arrays for selected pack entries
-// ---------------------------------------------------------------------------
 
 /**
  * Flat typed-array representation of selected pack entries, modeled after
@@ -49,6 +42,7 @@ export interface SelectionTable {
   entryIndices: Uint32Array;
   offsets: Float64Array;
   nextOffsets: Float64Array;
+  oidsRaw: Uint8Array; // capacity * 20, selected object OIDs
 
   /* header data — set during header-read pass */
   typeCodes: Uint8Array;
@@ -76,6 +70,7 @@ export function allocateSelectionTable(capacity: number): SelectionTable {
     entryIndices: new Uint32Array(capacity),
     offsets: new Float64Array(capacity),
     nextOffsets: new Float64Array(capacity),
+    oidsRaw: new Uint8Array(capacity * 20),
     typeCodes: new Uint8Array(capacity),
     headerLens: new Uint16Array(capacity),
     payloadLens: new Float64Array(capacity),
@@ -123,6 +118,10 @@ export function growSelectionTable(table: SelectionTable): void {
   table.sizeVarBuf = new Uint8Array(next * 5);
   table.sizeVarBuf.set(oldSvBuf);
 
+  const oldOidsRaw = table.oidsRaw;
+  table.oidsRaw = new Uint8Array(next * 20);
+  table.oidsRaw.set(oldOidsRaw);
+
   // baseSlots: new slots default to -1
   const oldBaseSlots = table.baseSlots;
   table.baseSlots = new Int32Array(next).fill(-1);
@@ -138,18 +137,58 @@ export function growSelectionTable(table: SelectionTable): void {
   table.capacity = next;
 }
 
-// ---------------------------------------------------------------------------
-// Dedup key — packed integer instead of string
-// ---------------------------------------------------------------------------
-
 /** Pack (packSlot, entryIndex) into a single number for Map<number, number>. */
 export function selectionKey(packSlot: number, entryIndex: number): number {
   return packSlot * 0x1_0000_0000 + entryIndex;
 }
 
-// ---------------------------------------------------------------------------
-// PackReadState — per-pack reader and optional whole-pack buffer
-// ---------------------------------------------------------------------------
+/**
+ * Copy the pack-position identity for a row.
+ *
+ * This helper keeps the per-row identity fields together so add/replace flows
+ * cannot forget to carry the raw OID bytes along with the new pack position.
+ */
+export function setSelectionEntryIdentity(
+  table: SelectionTable,
+  sel: number,
+  packSlot: number,
+  entryIndex: number,
+  idx: IdxView
+): void {
+  table.packSlots[sel] = packSlot;
+  table.entryIndices[sel] = entryIndex;
+  table.offsets[sel] = idx.offsets[entryIndex];
+
+  const nextOffset = getNextOffsetByIndex(idx, entryIndex);
+  if (nextOffset === undefined) {
+    throw new Error(`rewrite: missing next offset for pack#${packSlot} entry#${entryIndex}`);
+  }
+  table.nextOffsets[sel] = nextOffset;
+  table.oidsRaw.set(idx.rawNames.subarray(entryIndex * 20, entryIndex * 20 + 20), sel * 20);
+}
+
+/** Store the parsed pack header into the selection row. */
+export function storeSelectionHeader(
+  table: SelectionTable,
+  sel: number,
+  offset: number,
+  nextOffset: number,
+  header: PackHeaderEx
+): boolean {
+  table.typeCodes[sel] = header.type;
+  table.headerLens[sel] = header.headerLen;
+
+  const payloadLength = nextOffset - offset - header.headerLen;
+  if (payloadLength < 0) {
+    return false;
+  }
+  table.payloadLens[sel] = payloadLength;
+
+  const svStart = sel * 5;
+  table.sizeVarBuf.set(header.sizeVarBytes, svStart);
+  table.sizeVarLens[sel] = header.sizeVarBytes.length;
+  return true;
+}
 
 export type PackReadState = {
   pack: OrderedPackSnapshotEntry;

@@ -1,5 +1,6 @@
 import type { CacheContext } from "@/cache/index.ts";
 import type { Logger } from "@/common/logger.ts";
+import type { OrderedPackSnapshot } from "@/git/operations/fetch/types.ts";
 import type { RepoDurableObject } from "@/do/repo/repoDO.ts";
 
 import { createLogger, getRepoStubByDoId } from "@/common/index.ts";
@@ -193,7 +194,19 @@ export async function handleCompactionMessage(
       neededCount: neededOids.length,
     });
 
-    const packStream = await rewritePack(env, snapshot, neededOids, {
+    // Build a compaction-specific snapshot: source packs first so
+    // resolveOrderedEntryByOid picks authoritative source entries for needed
+    // OIDs, then remaining active packs in their normal newest-first order
+    // for delta base closure. Without this reorder, a duplicate identity
+    // REF_DELTA in a newer non-source pack can shadow the source entry and
+    // create a self-referential delta cycle in the topology sort.
+    const sourceKeySet = new Set(begin.sourcePacks.map((row) => row.packKey));
+    const fallbackPacks = snapshot.packs.filter((pack) => !sourceKeySet.has(pack.packKey));
+    const compactionSnapshot: OrderedPackSnapshot = {
+      packs: [...sourcePacks, ...fallbackPacks],
+    };
+
+    const packStream = await rewritePack(env, compactionSnapshot, neededOids, {
       limiter,
       countSubrequest: (n) => countCompactionSubrequest(cacheCtx, log, "r2:rewrite-pack", n),
     });
