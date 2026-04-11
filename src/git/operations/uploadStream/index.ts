@@ -7,7 +7,7 @@ import { parseFetchArgs } from "../args.ts";
 import { findCommonHaves } from "../closure.ts";
 import { buildAckOnlyResponse } from "../fetch/protocol.ts";
 import { repositoryNotReadyResponse } from "../fetch/responses.ts";
-import { planUploadPack } from "../fetch/plan.ts";
+import { buildServeUploadPackPlan, loadUploadPackSnapshot } from "../fetch/plan.ts";
 import { resolvePackStream } from "../fetch/execute.ts";
 import {
   SidebandProgressMux,
@@ -45,17 +45,21 @@ export async function handleFetchV2Streaming(
     return buildAckOnlyResponse(ackOids);
   }
 
-  const planStart = Date.now();
-  const plan = await planUploadPack(env, repoId, wants, haves, done, signal, cacheCtx);
-  if (plan.type === "RepositoryNotReady") {
-    log.warn("stream:fetch:repository-not-ready");
+  // Keep fetch readiness ahead of the response so clients still receive the
+  // current 503 + Retry-After signal while the repository is not yet fetchable.
+  const snapshotStart = Date.now();
+  const snapshotLoad = await loadUploadPackSnapshot(env, repoId, cacheCtx);
+  if (snapshotLoad.type === "RepositoryNotReady") {
+    log.warn("stream:fetch:repository-not-ready", { reason: snapshotLoad.reason });
     return repositoryNotReadyResponse();
   }
+  const snapshot = snapshotLoad.snapshot;
 
-  log.info("stream:fetch:immediate-stream", {
+  log.info("stream:fetch:snapshot-ready", {
     wants: wants.length,
     haves: haves.length,
-    timeMs: Date.now() - planStart,
+    packs: snapshot.packs.length,
+    timeMs: Date.now() - snapshotStart,
   });
 
   const responseStream = new ReadableStream<Uint8Array>({
@@ -63,7 +67,29 @@ export async function handleFetchV2Streaming(
       const streamLog = createLogger(env.LOG_LEVEL, { service: "StreamFetchV2", repoId });
       try {
         controller.enqueue(pktLine("packfile\n"));
-        emitProgress(controller, "remote: Preparing pack...\n");
+        // Once the response body has started, later failures must travel over
+        // Git sideband because the HTTP status line is already committed.
+        const planStart = Date.now();
+        streamLog.info("stream:fetch:planning-start", {
+          wants: wants.length,
+          haves: haves.length,
+        });
+        const plan = await buildServeUploadPackPlan(
+          env,
+          repoId,
+          snapshot,
+          wants,
+          haves,
+          signal,
+          cacheCtx,
+          (message) => emitProgress(controller, message)
+        );
+        streamLog.info("stream:fetch:planning-complete", {
+          needed: plan.neededOids.length,
+          timeMs: Date.now() - planStart,
+        });
+
+        emitProgress(controller, "Preparing pack...\n");
 
         const progressMux = new SidebandProgressMux();
         const limiter = getLimiter(plan.cacheCtx);
@@ -75,6 +101,9 @@ export async function handleFetchV2Streaming(
         });
 
         if (!packStream) {
+          streamLog.warn("stream:fetch:assemble-unavailable", {
+            needed: plan.neededOids.length,
+          });
           emitFatal(controller, "Unable to assemble pack");
           controller.close();
           return;

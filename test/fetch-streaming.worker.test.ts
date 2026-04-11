@@ -612,7 +612,7 @@ describe("git fetch streaming (default)", () => {
     expect(packStart).toBeGreaterThan(-1);
   });
 
-  it("shows immediate progress during planning phase", async () => {
+  it("shows planning progress before pack assembly for initial fetches", async () => {
     const owner = "o";
     const repo = uniqueRepoId("early-progress");
     const repoId = `${owner}/${repo}`;
@@ -664,8 +664,8 @@ describe("git fetch streaming (default)", () => {
     const progressMessages = orderedOutput.filter((o) => o.type === "progress");
     expect(progressMessages.length).toBeGreaterThan(0);
 
-    // The first message should be "remote: Preparing pack..."
-    expect(progressMessages[0]?.content).toContain("Preparing pack");
+    expect(progressMessages[0]?.content).toBe("Selecting objects to send...\n");
+    expect(progressMessages[1]?.content).toBe("Preparing pack...\n");
 
     // Verify progress comes before data
     const firstProgressIdx = orderedOutput.findIndex((o) => o.type === "progress");
@@ -674,5 +674,75 @@ describe("git fetch streaming (default)", () => {
     expect(firstProgressIdx).toBeGreaterThanOrEqual(0);
     expect(firstDataIdx).toBeGreaterThanOrEqual(0);
     expect(firstProgressIdx).toBeLessThan(firstDataIdx);
+  });
+
+  it("shows common-commit progress before pack assembly when haves are present", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("have-progress");
+    const repoId = `${owner}/${repo}`;
+
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid, parentOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
+      async (instance: RepoDurableObject) => {
+        const first = await instance.seedMinimalRepo();
+        const second = await instance.seedMinimalRepo();
+        return {
+          commitOid: second.commitOid,
+          parentOid: first.commitOid,
+        };
+      }
+    );
+
+    const body = buildFetchBody({
+      wants: [commitOid],
+      haves: [parentOid],
+      done: true,
+    });
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+
+    const res = await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+    } as any);
+
+    expect(res.status).toBe(200);
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const lines = decodePktLines(bytes);
+
+    const orderedOutput: { type: "progress" | "data"; content: string | number }[] = [];
+    let inPackfile = false;
+
+    for (const line of lines) {
+      if (line.type === "line" && line.text === "packfile\n") {
+        inPackfile = true;
+      } else if (inPackfile && line.type === "line" && line.raw) {
+        if (line.raw[0] === 0x02) {
+          const msg = new TextDecoder().decode(line.raw.subarray(1));
+          orderedOutput.push({ type: "progress", content: msg });
+        } else if (line.raw[0] === 0x01) {
+          orderedOutput.push({ type: "data", content: line.raw[1] });
+        }
+      }
+    }
+
+    const progressMessages = orderedOutput.filter((o) => o.type === "progress");
+    expect(progressMessages[0]?.content).toBe("Finding common commits...\n");
+    expect(progressMessages[1]?.content).toBe("Selecting objects to send...\n");
+    expect(progressMessages[2]?.content).toBe("Preparing pack...\n");
+
+    const prepareIdx = orderedOutput.findIndex(
+      (o) => o.type === "progress" && o.content === "Preparing pack...\n"
+    );
+    const firstDataIdx = orderedOutput.findIndex((o) => o.type === "data");
+
+    expect(prepareIdx).toBeGreaterThanOrEqual(0);
+    expect(firstDataIdx).toBeGreaterThanOrEqual(0);
+    expect(prepareIdx).toBeLessThan(firstDataIdx);
   });
 });

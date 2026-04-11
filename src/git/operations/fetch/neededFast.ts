@@ -10,7 +10,8 @@ export async function computeNeededFast(
   repoId: string,
   wants: string[],
   haves: string[],
-  cacheCtx?: CacheContext
+  cacheCtx?: CacheContext,
+  onProgress?: (message: string) => void
 ): Promise<string[]> {
   const log = createLogger(env.LOG_LEVEL, { service: "NeededFast", repoId });
   const startTime = Date.now();
@@ -21,6 +22,7 @@ export async function computeNeededFast(
 
   let ackOids: string[] = [];
   if (haves.length > 0) {
+    onProgress?.("Finding common commits...\n");
     ackOids = await findCommonHaves(env, repoId, haves, cacheCtx);
     for (const oid of ackOids) {
       stopSet.add(oid.toLowerCase());
@@ -30,6 +32,8 @@ export async function computeNeededFast(
       log.debug("fast:no-common-base", { haves: haves.length });
     }
   }
+
+  onProgress?.("Selecting objects to send...\n");
 
   if (ackOids.length > 0 && ackOids.length < 10) {
     const mainlineBudget = 20;
