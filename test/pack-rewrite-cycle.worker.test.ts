@@ -155,6 +155,7 @@ describe("pack rewrite cycles", () => {
     yPayload.set(xPayload, 0);
     yPayload.set(ySuffix, xPayload.length);
 
+    const seedOid = await computeOid("blob", seedPayload);
     const xOid = await computeOid("blob", xPayload);
     const yOid = await computeOid("blob", yPayload);
 
@@ -214,16 +215,20 @@ describe("pack rewrite cycles", () => {
 
     let olderXSel = -1;
     let olderYSel = -1;
+    let olderSeedSel = -1;
     for (let sel = 0; sel < table.count; sel++) {
       const oid = bytesToHex(table.oidsRaw.subarray(sel * 20, sel * 20 + 20));
       if (table.packSlots[sel] === 1 && oid === xOid) olderXSel = sel;
+      if (table.packSlots[sel] === 1 && oid === seedOid) olderSeedSel = sel;
       if (oid === yOid) olderYSel = sel;
     }
 
     // The older OFS chain must keep its exact base row so pack-local topology
     // stays acyclic even when a newer duplicate delta advertises the same OID.
+    expect(olderSeedSel).toBeGreaterThanOrEqual(0);
     expect(olderXSel).toBeGreaterThanOrEqual(0);
     expect(olderYSel).toBeGreaterThanOrEqual(0);
+    expect(table.baseSlots[olderXSel]).toBe(olderSeedSel);
     expect(table.baseSlots[olderYSel]).toBe(olderXSel);
     expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
   });

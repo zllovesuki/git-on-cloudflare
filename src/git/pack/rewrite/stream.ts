@@ -278,10 +278,42 @@ export function createRewriteStream(
           const packSlot = table.packSlots[sel];
           const readState = readStates.get(packSlot);
           const headerBytes = buildEntryHeaderBytes(table, sel);
-          if (!headerBytes || !readState) {
+          if (!readState) {
             const pack = snapshot.packs[packSlot];
+            log.error("rewrite:missing-read-state", {
+              sel,
+              packSlot,
+              entryIndex: table.entryIndices[sel],
+              packKey: pack?.packKey,
+              typeCode: table.typeCodes[sel],
+              baseSel: table.baseSlots[sel],
+            });
             throw new Error(
-              `rewrite: missing stream state for ${pack?.packKey}#${table.entryIndices[sel]}`
+              `rewrite: missing read state for ${pack?.packKey}#${table.entryIndices[sel]}`
+            );
+          }
+
+          if (!headerBytes) {
+            const pack = snapshot.packs[packSlot];
+            const svLen = table.sizeVarLens[sel];
+            const typeCode = table.typeCodes[sel];
+            const baseSel = table.baseSlots[sel];
+            const basePackSlot = baseSel >= 0 ? table.packSlots[baseSel] : undefined;
+            const baseEntryIndex = baseSel >= 0 ? table.entryIndices[baseSel] : undefined;
+            log.error("rewrite:invalid-header-state", {
+              sel,
+              packSlot,
+              entryIndex: table.entryIndices[sel],
+              packKey: pack?.packKey,
+              typeCode,
+              sizeVarLen: svLen,
+              hasBaseOidRaw: !!table.baseOidRaw,
+              baseSel,
+              basePackSlot,
+              baseEntryIndex,
+            });
+            throw new Error(
+              `rewrite: invalid header state for ${pack?.packKey}#${table.entryIndices[sel]}`
             );
           }
 

@@ -291,6 +291,7 @@ async function readHeaderAndResolveBase(
     log.warn("rewrite:invalid-payload-length", { packKey: pack.packKey, offset });
     return { ok: false };
   }
+  const resolvedHeader = header;
 
   let canonicalized = false;
   const ownership = await claimCanonicalOwner(
@@ -336,11 +337,10 @@ async function readHeaderAndResolveBase(
       offset,
       previousOwnerSel: ownership.previousOwnerSel,
     });
-    return {
-      ok: true,
-      ofsBaseCanonicalized: ownership.canonicalized,
-      supersedeSel: ownership.previousOwnerSel,
-    };
+    canonicalized = ownership.canonicalized;
+    // The current row stays live after reclaiming ownership, so its delta base
+    // still needs to be resolved below before the row can be streamed.
+    return resolveDeltaBaseAndFinish(ownership.previousOwnerSel);
   }
   if (ownership.kind === "swapped") {
     log.debug("rewrite:delta-canonicalized-to-full", {
@@ -351,87 +351,95 @@ async function readHeaderAndResolveBase(
   }
   canonicalized = ownership.canonicalized;
 
-  // --- OFS_DELTA: base is at (same pack, offset - baseRel) ----------------
-  if (header.type === 6 && header.baseRel !== undefined) {
-    const baseOffset = offset - header.baseRel;
-    const baseIndex = findOffsetIndex(pack.idx, baseOffset);
-    if (baseIndex === undefined) {
-      log.warn("rewrite:missing-ofs-base", { packKey: pack.packKey, offset, baseOffset });
-      return { ok: false };
-    }
+  return resolveDeltaBaseAndFinish();
 
-    // OFS_DELTA bases stay pack-local. The source pack's offset ordering is
-    // already acyclic; cross-pack canonicalization here can manufacture cycles
-    // when a newer duplicate of the same OID is itself stored as a delta.
-    const baseSel = addEntry(table, dedupMap, packSlot, baseIndex, pack.idx);
-    table.ofsPinned[baseSel] = 1;
+  function resolveDeltaBaseAndFinish(supersedeSel?: number): HeaderResolveResult {
+    // --- OFS_DELTA: base is at (same pack, offset - baseRel) ----------------
+    if (resolvedHeader.type === 6 && resolvedHeader.baseRel !== undefined) {
+      const baseOffset = offset - resolvedHeader.baseRel;
+      const baseIndex = findOffsetIndex(pack.idx, baseOffset);
+      if (baseIndex === undefined) {
+        log.warn("rewrite:missing-ofs-base", { packKey: pack.packKey, offset, baseOffset });
+        return { ok: false };
+      }
 
-    if (baseSel === sel) {
-      // Self-referential OFS_DELTA (e.g. baseRel is zero or points back to
-      // own offset). This indicates pack corruption — abort the selection so
-      // the caller can retry or investigate.
-      log.warn("rewrite:self-referential-delta", {
-        packKey: pack.packKey,
-        offset,
-        deltaType: "ofs",
-        baseRel: header.baseRel,
-      });
-      return { ok: false };
-    }
-    table.baseSlots[sel] = baseSel;
-    if (table.typeCodes[baseSel] === 0 && !table.queuedForHeader[baseSel]) {
-      table.queuedForHeader[baseSel] = 1;
-      secondaryQueue.push(baseSel);
-    }
-  }
+      // OFS_DELTA bases stay pack-local. The source pack's offset ordering is
+      // already acyclic; cross-pack canonicalization here can manufacture cycles
+      // when a newer duplicate of the same OID is itself stored as a delta.
+      const baseSel = addEntry(table, dedupMap, packSlot, baseIndex, pack.idx);
+      table.ofsPinned[baseSel] = 1;
 
-  // --- REF_DELTA: base identified by OID, may be in any pack --------------
-  if (header.type === 7 && header.baseOid) {
-    // Store raw base OID bytes for streaming (avoids hex round-trip later)
-    const rawBytes = hexToBytes(header.baseOid);
-    if (!table.baseOidRaw) {
-      table.baseOidRaw = new Uint8Array(table.capacity * 20);
-    }
-    table.baseOidRaw.set(rawBytes, sel * 20);
-
-    // findOidIndex accepts Uint8Array — avoids re-materializing hex string
-    const location = resolveOrderedEntryByOid(snapshot, rawBytes);
-    if (!location) {
-      log.warn("rewrite:missing-ref-base", {
-        packKey: pack.packKey,
-        offset,
-        baseOid: header.baseOid,
-      });
-      return { ok: false };
-    }
-
-    const baseSel = addEntry(
-      table,
-      dedupMap,
-      location.packSlot,
-      location.entryIndex,
-      location.pack.idx
-    );
-    if (baseSel === sel) {
-      // Self-referential REF_DELTA with no full-object duplicate available.
-      // This pack cannot be rewritten into a topologically valid output.
-      log.warn("rewrite:self-referential-delta", {
-        packKey: pack.packKey,
-        offset,
-        deltaType: "ref",
-        baseOid: header.baseOid,
-      });
-      return { ok: false };
-    } else {
+      if (baseSel === sel) {
+        // Self-referential OFS_DELTA (e.g. baseRel is zero or points back to
+        // own offset). This indicates pack corruption — abort the selection so
+        // the caller can retry or investigate.
+        log.warn("rewrite:self-referential-delta", {
+          packKey: pack.packKey,
+          offset,
+          deltaType: "ofs",
+          baseRel: resolvedHeader.baseRel,
+        });
+        return { ok: false };
+      }
       table.baseSlots[sel] = baseSel;
       if (table.typeCodes[baseSel] === 0 && !table.queuedForHeader[baseSel]) {
         table.queuedForHeader[baseSel] = 1;
         secondaryQueue.push(baseSel);
       }
     }
-  }
 
-  return { ok: true, ofsBaseCanonicalized: canonicalized };
+    // --- REF_DELTA: base identified by OID, may be in any pack --------------
+    if (resolvedHeader.type === 7 && resolvedHeader.baseOid) {
+      // Store raw base OID bytes for streaming (avoids hex round-trip later)
+      const rawBytes = hexToBytes(resolvedHeader.baseOid);
+      if (!table.baseOidRaw) {
+        table.baseOidRaw = new Uint8Array(table.capacity * 20);
+      }
+      table.baseOidRaw.set(rawBytes, sel * 20);
+
+      // findOidIndex accepts Uint8Array — avoids re-materializing hex string
+      const location = resolveOrderedEntryByOid(snapshot, rawBytes);
+      if (!location) {
+        log.warn("rewrite:missing-ref-base", {
+          packKey: pack.packKey,
+          offset,
+          baseOid: resolvedHeader.baseOid,
+        });
+        return { ok: false };
+      }
+
+      const baseSel = addEntry(
+        table,
+        dedupMap,
+        location.packSlot,
+        location.entryIndex,
+        location.pack.idx
+      );
+      if (baseSel === sel) {
+        // Self-referential REF_DELTA with no full-object duplicate available.
+        // This pack cannot be rewritten into a topologically valid output.
+        log.warn("rewrite:self-referential-delta", {
+          packKey: pack.packKey,
+          offset,
+          deltaType: "ref",
+          baseOid: resolvedHeader.baseOid,
+        });
+        return { ok: false };
+      }
+
+      table.baseSlots[sel] = baseSel;
+      if (table.typeCodes[baseSel] === 0 && !table.queuedForHeader[baseSel]) {
+        table.queuedForHeader[baseSel] = 1;
+        secondaryQueue.push(baseSel);
+      }
+    }
+
+    return {
+      ok: true,
+      ofsBaseCanonicalized: canonicalized,
+      supersedeSel,
+    };
+  }
 }
 
 /**

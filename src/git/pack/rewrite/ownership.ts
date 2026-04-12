@@ -235,6 +235,7 @@ export async function claimCanonicalOwner(
   const oidStart = sel * 20;
   const ownerSel = findSelectedOidOwner(oidOwners, table.oidsRaw, oidStart);
   if (ownerSel >= 0) {
+    const currentKey = selectionKey(table.packSlots[sel]!, table.entryIndices[sel]!);
     if (ownerSel === sel) {
       return { kind: "unchanged", canonicalized: false };
     }
@@ -251,6 +252,11 @@ export async function claimCanonicalOwner(
         previousOwnerSel: ownerSel,
       };
     }
+
+    // Keep future exact pack-position lookups collapsed onto the current live
+    // owner. Without this, later base resolution can recreate an extra row for
+    // the same pack entry after ownership already converged.
+    dedupMap.set(currentKey, ownerSel);
 
     if (
       !table.ofsPinned[ownerSel] &&
