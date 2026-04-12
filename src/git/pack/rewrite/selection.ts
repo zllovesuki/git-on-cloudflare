@@ -36,11 +36,12 @@ export type BuildSelectionResult = {
  * Result of reading a single entry header and resolving its delta base.
  *
  * When `redirectTo` is set, `sel` was redirected to another already-selected
- * owner for the same OID. The caller should mark `sel` as dead and compact it
- * out of the table after all phases complete.
+ * owner for the same OID. When `supersedeSel` is set, `sel` took ownership
+ * back from an older duplicate and that previous owner should be compacted out
+ * after all phases complete.
  */
 type HeaderResolveResult =
-  | { ok: true; ofsBaseCanonicalized: boolean; redirectTo?: number }
+  | { ok: true; ofsBaseCanonicalized: boolean; redirectTo?: number; supersedeSel?: number }
   | { ok: false };
 
 export async function buildSelection(
@@ -53,13 +54,14 @@ export async function buildSelection(
 ): Promise<BuildSelectionResult | undefined> {
   const table = allocateSelectionTable(Math.max(neededOids.length, 16));
   const readerStates = new Map<number, PackReadState>();
-  /** Maps selectionKey(packSlot, entryIndex) → selection slot for dedup. */
+  /** Maps selectionKey(packSlot, entryIndex) → selection slot for exact pack-position dedup. */
   const dedupMap = new Map<number, number>();
   const oidOwners = createSelectedOidLookup(table.capacity);
   const duplicateHeaderCache: DuplicateHeaderCache = new Map();
   const stats: SelectionStats = {
     duplicateRedirects: 0,
     duplicateOwnerUpgrades: 0,
+    duplicateOfsOwnerTakeovers: 0,
     duplicateHeaderProbes: 0,
   };
 
@@ -103,9 +105,9 @@ export async function buildSelection(
   // or redirected to an already-selected full owner for the same OID.
   let duplicateCanonicalizations = 0;
 
-  // Selected delta entries redirected to another already-selected owner for
-  // the same OID. Maps dead sel → redirect target and is compacted out after
-  // all phases finish.
+  // Duplicate-OID rows that will be compacted out after selection completes.
+  // Most entries redirect current sel → owner sel; OFS-pinned takeovers invert
+  // that and retire the previous owner instead.
   const deadSlots = new Map<number, number>();
 
   /** Collect the result of readHeaderAndResolveBase. Returns false on failure. */
@@ -114,6 +116,11 @@ export async function buildSelection(
     if (result.ofsBaseCanonicalized) duplicateCanonicalizations++;
     if (result.redirectTo !== undefined) {
       deadSlots.set(sel, result.redirectTo);
+      stats.duplicateRedirects++;
+    }
+    if (result.supersedeSel !== undefined) {
+      deadSlots.delete(sel);
+      deadSlots.set(result.supersedeSel, sel);
       stats.duplicateRedirects++;
     }
     return true;
@@ -197,6 +204,7 @@ export async function buildSelection(
     ownerLookupEntries: oidOwners.count,
     duplicateRedirects: stats.duplicateRedirects,
     duplicateOwnerUpgrades: stats.duplicateOwnerUpgrades,
+    duplicateOfsOwnerTakeovers: stats.duplicateOfsOwnerTakeovers,
     duplicateHeaderProbes: stats.duplicateHeaderProbes,
     resolveMs,
     headerReadMs,
@@ -322,6 +330,18 @@ async function readHeaderAndResolveBase(
       redirectTo: ownership.targetSel,
     };
   }
+  if (ownership.kind === "takeover") {
+    log.debug("rewrite:duplicate-owner-taken-over-by-ofs-base", {
+      fromPackKey: pack.packKey,
+      offset,
+      previousOwnerSel: ownership.previousOwnerSel,
+    });
+    return {
+      ok: true,
+      ofsBaseCanonicalized: ownership.canonicalized,
+      supersedeSel: ownership.previousOwnerSel,
+    };
+  }
   if (ownership.kind === "swapped") {
     log.debug("rewrite:delta-canonicalized-to-full", {
       fromPackKey: pack.packKey,
@@ -344,6 +364,7 @@ async function readHeaderAndResolveBase(
     // already acyclic; cross-pack canonicalization here can manufacture cycles
     // when a newer duplicate of the same OID is itself stored as a delta.
     const baseSel = addEntry(table, dedupMap, packSlot, baseIndex, pack.idx);
+    table.ofsPinned[baseSel] = 1;
 
     if (baseSel === sel) {
       // Self-referential OFS_DELTA (e.g. baseRel is zero or points back to
@@ -466,6 +487,7 @@ export function compactDeadSlots(
       table.baseSlots[write] = table.baseSlots[read];
       table.sizeVarBuf.set(table.sizeVarBuf.subarray(read * 5, read * 5 + 5), write * 5);
       table.queuedForHeader[write] = table.queuedForHeader[read];
+      table.ofsPinned[write] = table.ofsPinned[read];
       if (table.baseOidRaw) {
         table.baseOidRaw.set(table.baseOidRaw.subarray(read * 20, read * 20 + 20), write * 20);
       }

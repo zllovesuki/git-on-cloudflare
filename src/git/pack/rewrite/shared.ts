@@ -55,6 +55,7 @@ export interface SelectionTable {
   baseSlots: Int32Array; // sel of base, -1 = non-delta
   baseOidRaw: Uint8Array | null; // lazy; capacity * 20, for REF_DELTA
   queuedForHeader: Uint8Array; // 1 = already queued for header read
+  ofsPinned: Uint8Array; // 1 = exact pack position is required by an OFS_DELTA child
 
   /* output layout — set during convergence / topology sort */
   outputOffsets: Float64Array;
@@ -79,6 +80,7 @@ export function allocateSelectionTable(capacity: number): SelectionTable {
     baseSlots: new Int32Array(capacity).fill(-1),
     baseOidRaw: null, // allocated lazily on first REF_DELTA
     queuedForHeader: new Uint8Array(capacity),
+    ofsPinned: new Uint8Array(capacity),
     outputOffsets: new Float64Array(capacity),
     outputHeaderLens: new Uint16Array(capacity),
     outputOrder: new Uint32Array(capacity),
@@ -112,6 +114,7 @@ export function growSelectionTable(table: SelectionTable): void {
   table.outputOrder = grow(table.outputOrder, Uint32Array, next);
 
   table.queuedForHeader = grow(table.queuedForHeader, Uint8Array, next);
+  table.ofsPinned = grow(table.ofsPinned, Uint8Array, next);
 
   // sizeVarBuf is capacity * 5
   const oldSvBuf = table.sizeVarBuf;

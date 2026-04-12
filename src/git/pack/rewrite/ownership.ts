@@ -39,6 +39,7 @@ export type DuplicateHeaderCache = Map<number, PackHeaderEx | null>;
 export type SelectionStats = {
   duplicateRedirects: number;
   duplicateOwnerUpgrades: number;
+  duplicateOfsOwnerTakeovers: number;
   duplicateHeaderProbes: number;
 };
 
@@ -46,6 +47,7 @@ export type ClaimOwnerResult =
   | { kind: "unchanged"; canonicalized: boolean }
   | { kind: "swapped" }
   | { kind: "error" }
+  | { kind: "takeover"; canonicalized: boolean; previousOwnerSel: number }
   | { kind: "redirect"; canonicalized: boolean; targetSel: number; upgradedOwner: boolean };
 
 type FullDuplicateCandidate =
@@ -227,9 +229,9 @@ export async function claimCanonicalOwner(
   warnedFlags: Set<string>,
   options?: RewriteOptions
 ): Promise<ClaimOwnerResult> {
-  // The rewrite output must have exactly one live row per OID. Resolve that
-  // ownership before wiring any base edges so later delta-base closure can
-  // treat duplicates as redirects instead of distinct graph nodes.
+  // The rewrite output still prefers a single live row per OID, but OFS-pinned
+  // rows may need to reclaim ownership so pack-local base chains stay valid.
+  // Resolve that ownership before wiring any new base edges.
   const oidStart = sel * 20;
   const ownerSel = findSelectedOidOwner(oidOwners, table.oidsRaw, oidStart);
   if (ownerSel >= 0) {
@@ -237,13 +239,21 @@ export async function claimCanonicalOwner(
       return { kind: "unchanged", canonicalized: false };
     }
 
-    // Another live row already owns this OID. Future lookups of the current
-    // pack position should collapse directly onto that owner instead of
-    // materializing a second graph node for the same object.
-    const currentKey = selectionKey(table.packSlots[sel]!, table.entryIndices[sel]!);
-    dedupMap.set(currentKey, ownerSel);
+    if (table.ofsPinned[sel] && table.typeCodes[sel] >= 6 && !table.ofsPinned[ownerSel]) {
+      // OFS_DELTA children depend on the exact pack-local base position, not
+      // just the resulting OID. Let that exact row take ownership back so the
+      // later topology sort still sees the original acyclic within-pack chain.
+      stats.duplicateOfsOwnerTakeovers++;
+      setSelectedOidOwner(oidOwners, table.oidsRaw, oidStart, sel);
+      return {
+        kind: "takeover",
+        canonicalized: false,
+        previousOwnerSel: ownerSel,
+      };
+    }
 
     if (
+      !table.ofsPinned[ownerSel] &&
       table.typeCodes[sel]! < 6 &&
       table.typeCodes[ownerSel]! >= 6 &&
       upgradeOwnerSelectionToFull(table, ownerSel, sel)
@@ -269,7 +279,7 @@ export async function claimCanonicalOwner(
     };
   }
 
-  if (table.typeCodes[sel] === 6 || table.typeCodes[sel] === 7) {
+  if (!table.ofsPinned[sel] && (table.typeCodes[sel] === 6 || table.typeCodes[sel] === 7)) {
     // Delta rows get one extra chance to become the canonical owner by
     // locating a full-object duplicate anywhere in the snapshot.
     const candidate = await tryCanonicalizeDeltaSelectionToFull(
