@@ -7,10 +7,10 @@ type InputProps = {
 } & Omit<ComponentProps<"input">, "className">;
 
 const inputClasses =
-  "w-full rounded-xl border border-zinc-300 dark:border-zinc-700/60 bg-white dark:bg-zinc-800/80 px-4 py-2.5 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-500 focus:border-accent-500/50 focus:ring-1 focus:ring-accent-500/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-zinc-950";
+  "w-full rounded-xl border border-zinc-300 dark:border-zinc-700/60 bg-white dark:bg-zinc-800/80 px-4 py-2.5 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-500 focus:border-accent-500/50 focus:ring-1 focus:ring-accent-500/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas";
 
 const errorInputClasses =
-  "w-full rounded-xl border border-red-500/40 bg-white dark:bg-zinc-800/80 px-4 py-2.5 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-500 focus:border-red-500/50 focus:ring-1 focus:ring-red-500/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-zinc-950";
+  "w-full rounded-xl border border-red-500/40 bg-white dark:bg-zinc-800/80 px-4 py-2.5 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-500 focus:border-red-500/50 focus:ring-1 focus:ring-red-500/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas";
 
 export function Input({ label, helperText, error, id, ...rest }: InputProps) {
   const inputId = id || (label ? label.toLowerCase().replace(/\s+/g, "-") : undefined);

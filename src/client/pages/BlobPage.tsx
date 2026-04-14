@@ -1,8 +1,14 @@
+import { Breadcrumbs } from "@/client/components/Breadcrumbs";
 import { CodeViewer } from "@/client/components/CodeViewer";
 import { MarkdownContent } from "@/client/components/MarkdownContent";
 import { RepoNav } from "@/client/components/RepoNav";
 import { BlobActionsIsland } from "@/client/islands/blob-actions";
 import { IslandHost } from "@/client/server/IslandHost";
+
+type BreadcrumbItem = {
+  name: string;
+  href: string | null;
+};
 
 export type BlobPageProps = {
   owner: string;
@@ -26,6 +32,8 @@ export type BlobPageProps = {
   mdBase?: string;
   isBinary?: boolean;
   codeText?: string;
+  breadcrumbs?: BreadcrumbItem[];
+  parentHref?: string | null;
 };
 
 export function BlobPage(props: BlobPageProps) {
@@ -51,6 +59,8 @@ export function BlobPage(props: BlobPageProps) {
     mdBase,
     isBinary,
     codeText,
+    breadcrumbs,
+    parentHref,
   } = props;
 
   const showCopy = !isMarkdown && !isImage && !isPdf && !isBinary && !tooLarge;
@@ -61,7 +71,8 @@ export function BlobPage(props: BlobPageProps) {
       <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
         File
       </span>
-      <h2>Blob: {fileName}</h2>
+      <h2 className="font-display tracking-tight">Blob: {fileName}</h2>
+      <Breadcrumbs items={breadcrumbs} parentHref={parentHref} />
       <div className="blob-container mt-4 rounded-2xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800/60 dark:bg-zinc-900/50">
         <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2 dark:border-zinc-800/60">
           <div className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">

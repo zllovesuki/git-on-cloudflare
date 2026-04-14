@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { hydrateIsland } from "@/client/hydrate";
 import { Button } from "@/client/components/ui/button";
 import { Card } from "@/client/components/ui/card";
+import { Input } from "@/client/components/ui/input";
 import { PageHeader } from "@/client/components/ui/page-header";
 
 type AuthUser = {
@@ -191,7 +192,8 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
         <Card>
           <h3>1) Admin Token</h3>
           <div className="space-y-3">
-            <input
+            <Input
+              label="Admin Token"
               type="password"
               placeholder="Enter AUTH_ADMIN_TOKEN"
               value={adminToken}
@@ -202,7 +204,6 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
                   localStorage.setItem("adminToken", nextValue);
                 } catch {}
               }}
-              className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:border-zinc-700 dark:bg-zinc-800"
             />
             <Button className="w-full sm:w-auto" type="button" onClick={() => void loadUsers()}>
               {loadingUsers ? "Loading..." : "Load Users"}
@@ -215,17 +216,17 @@ export function AuthAdminIsland(_props: AuthAdminProps) {
         <Card>
           <h3>2) Add Owner / Token</h3>
           <div className="space-y-3">
-            <input
-              placeholder="owner (e.g., rachel)"
+            <Input
+              label="Owner"
+              placeholder="e.g., rachel"
               value={owner}
               onChange={(event) => setOwner(event.target.value)}
-              className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:border-zinc-700 dark:bg-zinc-800"
             />
-            <input
-              placeholder="token (raw)"
+            <Input
+              label="Token"
+              placeholder="Raw token value"
               value={token}
               onChange={(event) => setToken(event.target.value)}
-              className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:border-zinc-700 dark:bg-zinc-800"
             />
             <Button
               className="w-full sm:w-auto"

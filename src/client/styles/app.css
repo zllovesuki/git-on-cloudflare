@@ -12,6 +12,19 @@
   --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
   --font-display: "IBM Plex Serif", Georgia, "Times New Roman", serif;
 
+  /* Warm zinc overrides -- see Section 4 Neutral Palette */
+  --color-zinc-50: #fafaf9;
+  --color-zinc-100: #f5f4f4;
+  --color-zinc-200: #e5e4e5;
+  --color-zinc-300: #d6d4d7;
+  --color-zinc-400: #a3a1a8;
+  --color-zinc-500: #747178;
+  --color-zinc-600: #555259;
+  --color-zinc-700: #423f42;
+  --color-zinc-800: #2a2729;
+  --color-zinc-900: #1b181a;
+  --color-zinc-950: #0c090b;
+
   --color-accent-50: #eef2ff;
   --color-accent-100: #e0e7ff;
   --color-accent-200: #c7d2fe;
@@ -22,6 +35,9 @@
   --color-accent-700: #4338ca;
   --color-accent-800: #3730a3;
   --color-accent-900: #312e81;
+
+  /* Lifted warm canvas background -- see Section 4 Surface Hierarchy */
+  --color-canvas: #221f21;
 
   --animate-fade-in: fade-in 0.4s ease-out both;
   --animate-slide-up: slide-up 0.35s ease-out both;
@@ -84,27 +100,17 @@
   }
 
   body {
-    @apply font-sans text-zinc-100 antialiased;
-    background-color: #09090b;
-    background-image:
-      url("../assets/dark-shell-texture.svg"),
-      radial-gradient(circle at 20% 20%, rgb(99 102 241 / 0.02), transparent 50%),
-      radial-gradient(circle at 80% 80%, rgb(99 102 241 / 0.015), transparent 50%);
-    background-repeat: repeat, no-repeat, no-repeat;
-    background-position:
-      top left,
-      center top,
-      center top;
-    background-attachment: scroll, scroll, scroll;
+    @apply bg-canvas font-sans text-zinc-100 antialiased;
+    font-weight: 450;
   }
 
   html:not(.dark) body {
     @apply text-zinc-900;
-    background-color: #f4f4f5;
+    background-color: var(--color-zinc-100);
     background-image: none;
   }
 
-  html.dark {
+  html {
     color-scheme: dark;
   }
 
@@ -112,9 +118,12 @@
     color-scheme: light;
   }
 
+  *:focus-visible {
+    @apply outline-none ring-2 ring-accent-500/50 ring-offset-2 ring-offset-canvas;
+  }
+
   ::selection {
-    background: rgb(99 102 241 / 0.28);
-    color: var(--color-accent-50);
+    @apply bg-accent-500/[0.28] text-accent-50;
   }
 
   *,
@@ -152,39 +161,12 @@
 }
 
 @layer components {
-  :root {
-    scrollbar-color: rgb(0 0 0 / 0.12) transparent;
-  }
-
-  html.dark {
-    scrollbar-color: rgb(255 255 255 / 0.1) transparent;
-  }
-
-  ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
-
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  html.dark ::-webkit-scrollbar-thumb {
-    background: rgb(255 255 255 / 0.1);
-    border-radius: 3px;
-  }
-
-  html.dark ::-webkit-scrollbar-thumb:hover {
-    background: rgb(255 255 255 / 0.2);
-  }
-
-  html:not(.dark) ::-webkit-scrollbar-thumb {
-    background: rgb(0 0 0 / 0.12);
-    border-radius: 3px;
-  }
-
-  html:not(.dark) ::-webkit-scrollbar-thumb:hover {
-    background: rgb(0 0 0 / 0.2);
+  /* Scope scrollbar styling to scrollable containers, not * */
+  body,
+  .overflow-y-auto,
+  .overflow-auto {
+    scrollbar-width: thin;
+    scrollbar-color: theme(--color-zinc-700) transparent;
   }
 
   table {
@@ -216,13 +198,13 @@
   }
 
   .blob-container {
-    background: #fafafa;
-    border-color: #d4d4d8;
+    background: var(--color-zinc-50);
+    border-color: var(--color-zinc-300);
   }
 
   html.dark .blob-container {
-    background: rgb(24 24 27 / 0.5);
-    border-color: rgb(39 39 42 / 0.6);
+    background: color-mix(in srgb, var(--color-zinc-900) 50%, transparent);
+    border-color: color-mix(in srgb, var(--color-zinc-800) 60%, transparent);
   }
 
   .ref-menu > summary {
@@ -240,7 +222,7 @@
   }
 
   .markdown-content {
-    @apply text-[0.95rem] leading-7 text-zinc-700 dark:text-zinc-200;
+    @apply max-w-4xl text-[0.95rem] leading-7 text-zinc-700 dark:text-zinc-200;
   }
 
   .markdown-content > *:first-child {
@@ -351,25 +333,25 @@
     vertical-align: top;
     white-space: nowrap;
     user-select: none;
-    border-right: 1px solid rgb(228 228 231 / 0.8);
+    border-right: 1px solid color-mix(in srgb, var(--color-zinc-200) 80%, transparent);
   }
 
   html.dark .code-table .line-num {
-    border-right-color: rgb(63 63 70 / 0.9);
+    border-right-color: color-mix(in srgb, var(--color-zinc-700) 90%, transparent);
   }
 
   .code-table .line-num a {
     display: block;
-    color: #a1a1aa;
+    color: var(--color-zinc-400);
     text-decoration: none;
   }
 
   html.dark .code-table .line-num a {
-    color: #71717a;
+    color: var(--color-zinc-500);
   }
 
   .code-table .line-num a:hover {
-    color: #6366f1;
+    color: var(--color-accent-500);
   }
 
   .code-table .line-code {
@@ -379,11 +361,11 @@
   }
 
   .code-line:hover {
-    background: rgb(99 102 241 / 0.04);
+    background: color-mix(in srgb, var(--color-accent-500) 4%, transparent);
   }
 
   html.dark .code-line:hover {
-    background: rgb(99 102 241 / 0.08);
+    background: color-mix(in srgb, var(--color-accent-500) 8%, transparent);
   }
 
   .code-line {
@@ -392,12 +374,12 @@
 
   .code-line:target,
   .code-line.line-highlight {
-    background: rgb(99 102 241 / 0.08);
+    background: color-mix(in srgb, var(--color-accent-500) 8%, transparent);
   }
 
   html.dark .code-line:target,
   html.dark .code-line.line-highlight {
-    background: rgb(99 102 241 / 0.15);
+    background: color-mix(in srgb, var(--color-accent-500) 15%, transparent);
   }
 
   svg.inline {
@@ -612,11 +594,11 @@
     font-family: var(--font-mono);
     font-size: 0.75rem;
     line-height: 1.375rem;
-    color: #a1a1aa;
+    color: var(--color-zinc-400);
   }
 
   html.dark .diff-gutter {
-    color: #71717a;
+    color: var(--color-zinc-500);
   }
 
   /* Code cell */
@@ -646,16 +628,16 @@
   }
 
   .diff-line-hunk {
-    background: rgb(219 234 254 / 0.4) !important;
+    background: color-mix(in srgb, var(--color-accent-100) 40%, transparent) !important;
   }
 
   .diff-line-hunk .diff-code {
-    color: #6366f1;
+    color: var(--color-accent-500);
     font-style: italic;
   }
 
   .diff-line-hunk .diff-gutter {
-    color: #6366f1;
+    color: var(--color-accent-500);
   }
 
   /* Line-level diff coloring - dark */
@@ -676,15 +658,15 @@
   }
 
   html.dark .diff-line-hunk {
-    background: rgb(55 48 163 / 0.2) !important;
+    background: color-mix(in srgb, var(--color-accent-800) 20%, transparent) !important;
   }
 
   html.dark .diff-line-hunk .diff-code {
-    color: #a5b4fc;
+    color: var(--color-accent-300);
   }
 
   html.dark .diff-line-hunk .diff-gutter {
-    color: #a5b4fc;
+    color: var(--color-accent-300);
   }
 
   /* Loading state */

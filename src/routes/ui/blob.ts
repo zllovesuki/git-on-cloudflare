@@ -46,6 +46,32 @@ export async function handleBlob(request: RouteRequest, env: Env, ctx: Execution
     if (result.type !== "blob") return new Response("Not a blob\n", { status: 400 });
     const fileName = path || result.oid;
 
+    // Generate breadcrumbs and parent link (same pattern as tree.ts)
+    const parts = (path || "").split("/").filter(Boolean);
+    const refDisplay = ref.length > 20 ? ref.slice(0, 7) + "..." : ref;
+    const breadcrumbs = [
+      {
+        name: refDisplay,
+        href: parts.length > 0 ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}` : null,
+      },
+      ...parts.map((part: string, i: number) => {
+        const subPath = parts.slice(0, i + 1).join("/");
+        const isLast = i === parts.length - 1;
+        return {
+          name: part,
+          href: isLast
+            ? null
+            : `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(subPath)}`,
+        };
+      }),
+    ];
+    const parentHref =
+      parts.length > 1
+        ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
+        : parts.length === 1
+          ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}`
+          : null;
+
     // Too large to render inline
     if (result.tooLarge) {
       const sizeStr = formatSize(result.size || 0);
@@ -61,6 +87,8 @@ export async function handleBlob(request: RouteRequest, env: Env, ctx: Execution
         sizeStr,
         viewRawHref,
         rawHref,
+        breadcrumbs,
+        parentHref,
       });
       if (!html) {
         return new Response("Failed to render view", { status: 500 });
@@ -86,6 +114,8 @@ export async function handleBlob(request: RouteRequest, env: Env, ctx: Execution
       refEnc: encodeURIComponent(ref),
       fileName,
       viewRawHref,
+      breadcrumbs,
+      parentHref,
       rawHref,
     };
 

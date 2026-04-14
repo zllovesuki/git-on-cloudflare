@@ -26,7 +26,7 @@ export function OwnerPage({ owner, repos }: OwnerPageProps) {
             <a
               key={repo}
               href={`/${owner}/${repo}`}
-              className="group block animate-slide-up opacity-0 rounded-2xl border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/50 p-5 hover:-translate-y-0.5 transition-transform cursor-pointer hover:border-zinc-300 dark:hover:border-zinc-700/60 hover:shadow-sm"
+              className="group block animate-slide-up opacity-0 rounded-2xl border border-zinc-300 dark:border-zinc-800/60 bg-white shadow-sm dark:bg-zinc-900/50 dark:shadow-none p-5 hover:-translate-y-0.5 transition-transform cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-700/60 hover:shadow-md"
               style={{ animationDelay: `${Math.min(i, 7) * 60}ms` }}
             >
               <div className="flex items-center gap-3">

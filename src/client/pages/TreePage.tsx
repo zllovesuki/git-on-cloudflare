@@ -45,7 +45,7 @@ export function TreePage({
         <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
           Browse
         </span>
-        <h2>Tree</h2>
+        <h2 className="font-display tracking-tight">Tree</h2>
         <Breadcrumbs items={breadcrumbs} parentHref={parentHref} />
         <table className="mt-4 overflow-hidden rounded-2xl border border-zinc-200 shadow-xs dark:border-zinc-800/60">
           <thead>

@@ -1,3 +1,5 @@
+import { ArrowRight } from "lucide-react";
+
 export function HomePage() {
   return (
     <div className="space-y-12 pt-8 sm:pt-12">
@@ -24,11 +26,8 @@ export function HomePage() {
           <div>
             <span className="select-none text-zinc-500">$ </span>
             <span className="text-zinc-800 dark:text-zinc-100">
-              git clone https://git-on-cloudflare.com/
+              git clone https://git-on-cloudflare.com/rachel/git-on-cloudflare
             </span>
-            <span className="text-accent-400">&lt;owner&gt;</span>
-            <span className="text-zinc-800 dark:text-zinc-100">/</span>
-            <span className="text-accent-400">&lt;repo&gt;</span>
           </div>
         </div>
       </section>
@@ -39,28 +38,40 @@ export function HomePage() {
             href="https://git-on-cloudflare.com/rachel/git-on-cloudflare"
             target="_blank"
             rel="noreferrer"
-            className="group block rounded-xl p-4 no-underline hover:bg-white dark:hover:bg-zinc-900/60"
+            className="group block rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/50 p-4 no-underline transition-colors hover:border-zinc-300 dark:hover:border-zinc-700 hover:shadow-sm"
           >
             <dt className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 group-hover:text-accent-500 dark:group-hover:text-accent-400">
               Browse source
             </dt>
-            <dd className="mt-1 text-sm text-zinc-500">
-              Explore the{" "}
-              <span className="text-accent-500 dark:text-accent-400">git-on-cloudflare</span>{" "}
-              repository — code, commits, and trees.
+            <dd className="mt-1 flex items-center justify-between text-sm text-zinc-500">
+              <span>
+                Explore the{" "}
+                <span className="text-accent-500 dark:text-accent-400">git-on-cloudflare</span>{" "}
+                repository — code, commits, and trees.
+              </span>
+              <ArrowRight
+                className="ml-2 h-4 w-4 flex-shrink-0 text-zinc-400 transition-transform group-hover:translate-x-0.5"
+                aria-hidden="true"
+              />
             </dd>
           </a>
           <a
             href="/auth"
-            className="group block rounded-xl p-4 no-underline hover:bg-white dark:hover:bg-zinc-900/60"
+            className="group block rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/50 p-4 no-underline transition-colors hover:border-zinc-300 dark:hover:border-zinc-700 hover:shadow-sm"
           >
             <dt className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 group-hover:text-accent-500 dark:group-hover:text-accent-400">
               Manage auth
             </dt>
-            <dd className="mt-1 text-sm text-zinc-500">
-              Configure <span className="text-accent-500 dark:text-accent-400">owners</span> and{" "}
-              <span className="text-accent-500 dark:text-accent-400">access tokens</span> for push
-              access.
+            <dd className="mt-1 flex items-center justify-between text-sm text-zinc-500">
+              <span>
+                Configure <span className="text-accent-500 dark:text-accent-400">owners</span> and{" "}
+                <span className="text-accent-500 dark:text-accent-400">access tokens</span> for push
+                access.
+              </span>
+              <ArrowRight
+                className="ml-2 h-4 w-4 flex-shrink-0 text-zinc-400 transition-transform group-hover:translate-x-0.5"
+                aria-hidden="true"
+              />
             </dd>
           </a>
         </dl>

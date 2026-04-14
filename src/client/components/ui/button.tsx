@@ -23,11 +23,11 @@ type ButtonAsAnchor = ButtonBaseProps &
 export type ButtonProps = ButtonAsButton | ButtonAsAnchor;
 
 const shared =
-  "inline-flex items-center justify-center gap-2 rounded-xl font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-zinc-950 disabled:opacity-50 disabled:pointer-events-none";
+  "inline-flex items-center justify-center gap-2 rounded-xl font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas disabled:opacity-50 disabled:pointer-events-none";
 
 const variants: Record<ButtonVariant, string> = {
   primary:
-    "bg-gradient-to-r from-accent-500 to-accent-600 text-white shadow-sm shadow-accent-500/10 hover:shadow-md hover:shadow-accent-500/15 active:scale-[0.98] transition-[transform,box-shadow]",
+    "bg-accent-600 text-white hover:bg-accent-500 active:scale-[0.98] transition-[background-color,transform]",
   secondary:
     "border border-zinc-300 dark:border-zinc-700/60 bg-zinc-100 dark:bg-zinc-800/60 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700/60 active:scale-[0.98] transition-transform",
   danger:

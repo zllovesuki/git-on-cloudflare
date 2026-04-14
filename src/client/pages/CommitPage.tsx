@@ -1,4 +1,5 @@
 import { RepoNav } from "@/client/components/RepoNav";
+import { Card } from "@/client/components/ui/card";
 import { CommitDiffExpanderIsland } from "@/client/islands/commit-diff-expander";
 import { IslandHost } from "@/client/server/IslandHost";
 
@@ -68,28 +69,42 @@ export function CommitPage({
       <span className="mb-1 inline-block text-xs font-semibold uppercase tracking-wider text-accent-500 dark:text-accent-400">
         Commit Detail
       </span>
-      <h2>Commit {commitShort}</h2>
-      <p>
-        <strong>Author:</strong> {authorName} &lt;{authorEmail}&gt;{" "}
-        <span className="text-zinc-500 dark:text-zinc-400">{when}</span>
-      </p>
-      <p>
-        <strong>Parents:</strong>{" "}
-        {parents.length ? (
-          parents.map((parent, index) => (
-            <span key={parent.oid}>
-              {index > 0 ? ", " : null}
-              <a href={`/${owner}/${repo}/commit/${parent.oid}`}>{parent.short}</a>
-            </span>
-          ))
-        ) : (
-          <span className="text-zinc-500 dark:text-zinc-400">(none)</span>
-        )}
-      </p>
-      <p>
-        <strong>Tree:</strong> <a href={`/${owner}/${repo}/tree?ref=${refEnc}`}>{treeShort}</a>
-      </p>
-      <pre>{message}</pre>
+      <h2 className="font-display tracking-tight">Commit {commitShort}</h2>
+
+      <div className="space-y-4">
+        <Card>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt className="font-medium text-zinc-500 dark:text-zinc-400">Author</dt>
+            <dd>
+              {authorName} &lt;{authorEmail}&gt;{" "}
+              <span className="text-zinc-500 dark:text-zinc-400">{when}</span>
+            </dd>
+            <dt className="font-medium text-zinc-500 dark:text-zinc-400">Parents</dt>
+            <dd>
+              {parents.length ? (
+                parents.map((parent, index) => (
+                  <span key={parent.oid}>
+                    {index > 0 ? ", " : null}
+                    <a href={`/${owner}/${repo}/commit/${parent.oid}`}>{parent.short}</a>
+                  </span>
+                ))
+              ) : (
+                <span className="text-zinc-500 dark:text-zinc-400">(root commit)</span>
+              )}
+            </dd>
+            <dt className="font-medium text-zinc-500 dark:text-zinc-400">Tree</dt>
+            <dd>
+              <a href={`/${owner}/${repo}/tree?ref=${refEnc}`}>{treeShort}</a>
+            </dd>
+          </dl>
+        </Card>
+        <Card>
+          <pre className="!m-0 whitespace-pre-wrap !rounded-none !border-0 !bg-transparent !p-0">
+            {message}
+          </pre>
+        </Card>
+      </div>
+
       <h3>Files changed</h3>
       <IslandHost
         name="commit-diff-expander"

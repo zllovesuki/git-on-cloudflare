@@ -36,7 +36,7 @@ export function ThemeToggleIsland(_props: ThemeToggleProps) {
     <button
       type="button"
       data-theme-toggle
-      className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-zinc-950"
+      className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
       aria-label={`Toggle theme (current: ${theme === "dark" ? "Dark" : "Light"})`}
       onClick={() => {
         const nextTheme = theme === "dark" ? "light" : "dark";

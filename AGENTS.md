@@ -199,6 +199,7 @@ Do not edit generated migrations under `src/drizzle/` manually. Treat `src/do/re
 
 ## UI Notes
 
+- Design context (audience, brand personality, aesthetic direction, color/typography choices) lives in `.impeccable.md` at the project root. Read it before making visual or UX decisions.
 - SSR pages live in `src/client/pages/`.
 - Shared shell/document logic lives in `src/client/server/`.
 - Client interactivity should stay in focused islands under `src/client/islands/`.

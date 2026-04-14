@@ -27,7 +27,7 @@ export function Document({ title, assets, needsHighlight = false, children }: Do
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link
-          href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Serif:wght@600;700&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400..700&family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Serif:wght@600;700&display=swap"
           rel="stylesheet"
         />
         {needsHighlight && initialHighlightThemeHref ? (
