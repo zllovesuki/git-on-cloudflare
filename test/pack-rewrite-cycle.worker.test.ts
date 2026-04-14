@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
+import { concatChunks } from "@/git";
 import { bytesToHex, createLogger } from "@/common/index.ts";
 import { computeOid } from "@/git/core/objects.ts";
+import { rewritePack } from "@/git/pack/rewrite.ts";
 import { buildOutputOrder, buildSelection } from "@/git/pack/rewrite/plan.ts";
 import type { PackCatalogRow } from "@/do/repo/db/schema.ts";
 import { buildAppendOnlyDelta, buildPack } from "./util/test-helpers.ts";
@@ -26,6 +28,17 @@ function buildCopyPrefixDelta(base: Uint8Array, prefixLength: number): Uint8Arra
     0x90,
     prefixLength,
   ]);
+}
+
+async function readStreamBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
+  }
+  return concatChunks(chunks);
 }
 
 describe("pack rewrite cycles", () => {
@@ -313,5 +326,301 @@ describe("pack rewrite cycles", () => {
     expect(table.baseSlots[olderPinnedBaseSel]).toBe(newerBaseSel);
     expect(table.baseSlots[childSel]).toBe(olderPinnedBaseSel);
     expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
+  });
+
+  it("resolves the base chain for redirected duplicate deltas that dead-slot pruning keeps live", async () => {
+    const seedPayload = new TextEncoder().encode("seed\n");
+    const xSuffix = new TextEncoder().encode("x\n");
+    const xPayload = new Uint8Array(seedPayload.length + xSuffix.length);
+    xPayload.set(seedPayload, 0);
+    xPayload.set(xSuffix, seedPayload.length);
+
+    const childSuffix = new TextEncoder().encode("child\n");
+    const childPayload = new Uint8Array(xPayload.length + childSuffix.length);
+    childPayload.set(xPayload, 0);
+    childPayload.set(childSuffix, xPayload.length);
+
+    const xOid = await computeOid("blob", xPayload);
+    const childOid = await computeOid("blob", childPayload);
+
+    // Layout:
+    //   0: full seed
+    //   1: OFS delta seed -> x
+    //   2: OFS identity delta x -> x   (selected owner for x)
+    //   3: OFS identity delta x -> x   (redirected duplicate for x)
+    //   4: OFS delta x -> child        (depends on the selected owner)
+    //
+    // The selected x row depends on the duplicate x row, so dead-slot pruning
+    // must keep that duplicate live to avoid folding the owner back onto
+    // itself. Before the fix, row 3 survived compaction with `baseSlots = -1`
+    // because redirected rows returned before resolving their own base edge.
+    const packBytes = await buildPack([
+      { type: "blob", payload: seedPayload },
+      { type: "ofs-delta", baseIndex: 0, delta: buildAppendOnlyDelta(seedPayload, xSuffix) },
+      { type: "ofs-delta", baseIndex: 1, delta: buildCopyPrefixDelta(xPayload, xPayload.length) },
+      { type: "ofs-delta", baseIndex: 2, delta: buildCopyPrefixDelta(xPayload, xPayload.length) },
+      { type: "ofs-delta", baseIndex: 2, delta: buildAppendOnlyDelta(xPayload, childSuffix) },
+    ]);
+
+    const packKey = `test/rewrite-retained-redirect-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(packKey, packBytes);
+    const resolve = await indexTestPack(env, packKey, packBytes.byteLength);
+
+    const selection = await buildSelection(
+      env,
+      {
+        packs: [{ packKey, packBytes: packBytes.byteLength, idx: resolve.idxView }],
+      },
+      [xOid, childOid],
+      createLogger("error", { service: "test" }),
+      new Set(),
+      {
+        limiter: { run: async (_label, fn) => await fn() },
+        countSubrequest: () => {},
+      }
+    );
+
+    expect(selection).toBeDefined();
+    const table = selection!.table;
+
+    const xSels: number[] = [];
+    let childSel = -1;
+    for (let sel = 0; sel < table.count; sel++) {
+      const oid = bytesToHex(table.oidsRaw.subarray(sel * 20, sel * 20 + 20));
+      if (oid === xOid) xSels.push(sel);
+      if (oid === childOid) childSel = sel;
+    }
+
+    const selectedOwnerSel = childSel >= 0 ? table.baseSlots[childSel] : -1;
+    const retainedDuplicateSel = selectedOwnerSel >= 0 ? table.baseSlots[selectedOwnerSel] : -1;
+    const rootBaseSel = retainedDuplicateSel >= 0 ? table.baseSlots[retainedDuplicateSel] : -1;
+
+    // Dead-slot pruning keeps the redirected duplicate OFS_DELTA live because
+    // the selected owner still depends on it. That retained row must resolve
+    // its own base chain before streaming, otherwise the rewrite emits a live
+    // delta row without a base reference.
+    expect(xSels).toHaveLength(2);
+    expect(retainedDuplicateSel).toBeGreaterThanOrEqual(0);
+    expect(selectedOwnerSel).toBeGreaterThanOrEqual(0);
+    expect(childSel).toBeGreaterThanOrEqual(0);
+    expect(table.baseSlots[selectedOwnerSel]).toBe(retainedDuplicateSel);
+    expect(table.baseSlots[childSel]).toBe(selectedOwnerSel);
+    expect(rootBaseSel).toBeGreaterThanOrEqual(0);
+    expect(table.baseSlots[rootBaseSel]).toBe(-1);
+    expect(table.typeCodes[rootBaseSel]).toBeLessThan(6);
+    expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
+  });
+
+  it("resolves retained redirected ref-delta rows before streaming reaches them", async () => {
+    const seedPayload = new TextEncoder().encode("seed\n");
+    const xSuffix = new TextEncoder().encode("x\n");
+    const xPayload = new Uint8Array(seedPayload.length + xSuffix.length);
+    xPayload.set(seedPayload, 0);
+    xPayload.set(xSuffix, seedPayload.length);
+
+    const childSuffix = new TextEncoder().encode("child\n");
+    const childPayload = new Uint8Array(xPayload.length + childSuffix.length);
+    childPayload.set(xPayload, 0);
+    childPayload.set(childSuffix, xPayload.length);
+
+    const seedOid = await computeOid("blob", seedPayload);
+    const childOid = await computeOid("blob", childPayload);
+
+    // Layout:
+    //   0: full seed
+    //   1: REF delta seed -> x         (redirected duplicate for x)
+    //   2: OFS identity delta x -> x   (selected owner for x)
+    //   3: OFS delta x -> child        (depends on the selected owner)
+    //
+    // Row 1 is a retained redirected REF_DELTA. Before the retained-redirect
+    // repair pass, this row stayed live with `baseSlots = -1`.
+    const packBytes = await buildPack([
+      { type: "blob", payload: seedPayload },
+      {
+        type: "ref-delta",
+        baseOid: seedOid,
+        delta: buildAppendOnlyDelta(seedPayload, xSuffix),
+      },
+      { type: "ofs-delta", baseIndex: 1, delta: buildCopyPrefixDelta(xPayload, xPayload.length) },
+      { type: "ofs-delta", baseIndex: 2, delta: buildAppendOnlyDelta(xPayload, childSuffix) },
+    ]);
+
+    const packKey = `test/rewrite-retained-ref-delta-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(packKey, packBytes);
+    const resolve = await indexTestPack(env, packKey, packBytes.byteLength);
+
+    const selection = await buildSelection(
+      env,
+      {
+        packs: [{ packKey, packBytes: packBytes.byteLength, idx: resolve.idxView }],
+      },
+      [childOid],
+      createLogger("error", { service: "test" }),
+      new Set(),
+      {
+        limiter: { run: async (_label, fn) => await fn() },
+        countSubrequest: () => {},
+      }
+    );
+
+    expect(selection).toBeDefined();
+    const table = selection!.table;
+
+    let childSel = -1;
+    for (let sel = 0; sel < table.count; sel++) {
+      const oid = bytesToHex(table.oidsRaw.subarray(sel * 20, sel * 20 + 20));
+      if (oid === childOid) childSel = sel;
+    }
+
+    const selectedOwnerSel = childSel >= 0 ? table.baseSlots[childSel] : -1;
+    const retainedRefSel = selectedOwnerSel >= 0 ? table.baseSlots[selectedOwnerSel] : -1;
+    const rootBaseSel = retainedRefSel >= 0 ? table.baseSlots[retainedRefSel] : -1;
+
+    expect(retainedRefSel).toBeGreaterThanOrEqual(0);
+    expect(selectedOwnerSel).toBeGreaterThanOrEqual(0);
+    expect(childSel).toBeGreaterThanOrEqual(0);
+    expect(table.typeCodes[selectedOwnerSel]).toBe(6);
+    expect(table.typeCodes[retainedRefSel]).toBe(7);
+    expect(table.baseSlots[selectedOwnerSel]).toBe(retainedRefSel);
+    expect(table.baseSlots[childSel]).toBe(selectedOwnerSel);
+    expect(rootBaseSel).toBeGreaterThanOrEqual(0);
+    expect(table.baseSlots[rootBaseSel]).toBe(-1);
+    expect(table.typeCodes[rootBaseSel]).toBeLessThan(6);
+    expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
+  });
+
+  it("resolves multi-hop retained redirect chains discovered after the first repair pass", async () => {
+    const seedPayload = new TextEncoder().encode("seed\n");
+    const xSuffix = new TextEncoder().encode("x\n");
+    const xPayload = new Uint8Array(seedPayload.length + xSuffix.length);
+    xPayload.set(seedPayload, 0);
+    xPayload.set(xSuffix, seedPayload.length);
+
+    const childSuffix = new TextEncoder().encode("child\n");
+    const childPayload = new Uint8Array(xPayload.length + childSuffix.length);
+    childPayload.set(xPayload, 0);
+    childPayload.set(childSuffix, xPayload.length);
+
+    const seedOid = await computeOid("blob", seedPayload);
+    const childOid = await computeOid("blob", childPayload);
+
+    // Layout:
+    //   0: full seed
+    //   1: REF delta seed -> x         (retained redirect discovered on pass 2)
+    //   2: OFS identity delta x -> x   (retained redirect discovered on pass 1)
+    //   3: OFS identity delta x -> x   (selected owner for x)
+    //   4: OFS delta x -> child        (depends on the selected owner)
+    //
+    // The owner row depends on row 2, and row 2 depends on row 1. This forces
+    // the retained-redirect repair logic to run more than once.
+    const packBytes = await buildPack([
+      { type: "blob", payload: seedPayload },
+      {
+        type: "ref-delta",
+        baseOid: seedOid,
+        delta: buildAppendOnlyDelta(seedPayload, xSuffix),
+      },
+      { type: "ofs-delta", baseIndex: 1, delta: buildCopyPrefixDelta(xPayload, xPayload.length) },
+      { type: "ofs-delta", baseIndex: 2, delta: buildCopyPrefixDelta(xPayload, xPayload.length) },
+      { type: "ofs-delta", baseIndex: 3, delta: buildAppendOnlyDelta(xPayload, childSuffix) },
+    ]);
+
+    const packKey = `test/rewrite-retained-ref-chain-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(packKey, packBytes);
+    const resolve = await indexTestPack(env, packKey, packBytes.byteLength);
+
+    const selection = await buildSelection(
+      env,
+      {
+        packs: [{ packKey, packBytes: packBytes.byteLength, idx: resolve.idxView }],
+      },
+      [childOid],
+      createLogger("error", { service: "test" }),
+      new Set(),
+      {
+        limiter: { run: async (_label, fn) => await fn() },
+        countSubrequest: () => {},
+      }
+    );
+
+    expect(selection).toBeDefined();
+    const table = selection!.table;
+
+    let childSel = -1;
+    for (let sel = 0; sel < table.count; sel++) {
+      const oid = bytesToHex(table.oidsRaw.subarray(sel * 20, sel * 20 + 20));
+      if (oid === childOid) childSel = sel;
+    }
+
+    const selectedOwnerSel = childSel >= 0 ? table.baseSlots[childSel] : -1;
+    const retainedOfsSel = selectedOwnerSel >= 0 ? table.baseSlots[selectedOwnerSel] : -1;
+    const retainedRefSel = retainedOfsSel >= 0 ? table.baseSlots[retainedOfsSel] : -1;
+    const rootBaseSel = retainedRefSel >= 0 ? table.baseSlots[retainedRefSel] : -1;
+
+    expect(selectedOwnerSel).toBeGreaterThanOrEqual(0);
+    expect(retainedOfsSel).toBeGreaterThanOrEqual(0);
+    expect(retainedRefSel).toBeGreaterThanOrEqual(0);
+    expect(rootBaseSel).toBeGreaterThanOrEqual(0);
+    expect(table.typeCodes[selectedOwnerSel]).toBe(6);
+    expect(table.typeCodes[retainedOfsSel]).toBe(6);
+    expect(table.typeCodes[retainedRefSel]).toBe(7);
+    expect(table.baseSlots[selectedOwnerSel]).toBe(retainedOfsSel);
+    expect(table.baseSlots[retainedOfsSel]).toBe(retainedRefSel);
+    expect(table.baseSlots[retainedRefSel]).toBe(rootBaseSel);
+    expect(table.baseSlots[rootBaseSel]).toBe(-1);
+    expect(table.typeCodes[rootBaseSel]).toBeLessThan(6);
+    expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
+  });
+
+  it("streams an indexable pack for a retained redirected ref-delta shape", async () => {
+    const seedPayload = new TextEncoder().encode("seed\n");
+    const xSuffix = new TextEncoder().encode("x\n");
+    const xPayload = new Uint8Array(seedPayload.length + xSuffix.length);
+    xPayload.set(seedPayload, 0);
+    xPayload.set(xSuffix, seedPayload.length);
+
+    const childSuffix = new TextEncoder().encode("child\n");
+    const childPayload = new Uint8Array(xPayload.length + childSuffix.length);
+    childPayload.set(xPayload, 0);
+    childPayload.set(childSuffix, xPayload.length);
+
+    const seedOid = await computeOid("blob", seedPayload);
+    const childOid = await computeOid("blob", childPayload);
+
+    const packBytes = await buildPack([
+      { type: "blob", payload: seedPayload },
+      {
+        type: "ref-delta",
+        baseOid: seedOid,
+        delta: buildAppendOnlyDelta(seedPayload, xSuffix),
+      },
+      { type: "ofs-delta", baseIndex: 1, delta: buildCopyPrefixDelta(xPayload, xPayload.length) },
+      { type: "ofs-delta", baseIndex: 2, delta: buildAppendOnlyDelta(xPayload, childSuffix) },
+    ]);
+
+    const packKey = `test/rewrite-retained-ref-stream-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(packKey, packBytes);
+    const resolve = await indexTestPack(env, packKey, packBytes.byteLength);
+
+    const stream = await rewritePack(
+      env,
+      {
+        packs: [{ packKey, packBytes: packBytes.byteLength, idx: resolve.idxView }],
+      },
+      [childOid],
+      {
+        limiter: { run: async (_label, fn) => await fn() },
+        countSubrequest: () => {},
+      }
+    );
+
+    expect(stream).toBeDefined();
+    const rewrittenPack = await readStreamBytes(stream!);
+    expect(new TextDecoder().decode(rewrittenPack.subarray(0, 4))).toBe("PACK");
+
+    const verifyKey = `test/rewrite-retained-ref-stream-verify-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(verifyKey, rewrittenPack);
+    const verify = await indexTestPack(env, verifyKey, rewrittenPack.byteLength);
+    expect(verify.idxView.count).toBeGreaterThanOrEqual(4);
   });
 });

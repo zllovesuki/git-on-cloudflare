@@ -1,6 +1,7 @@
 import type { OrderedPackSnapshot } from "@/git/operations/fetch/types.ts";
 import type { IdxView } from "@/git/object-store/types.ts";
 import type { Logger } from "@/common/logger.ts";
+import type { PackHeaderEx } from "../packMeta.ts";
 
 import { hexToBytes } from "@/common/index.ts";
 import { findOffsetIndex } from "@/git/object-store/index.ts";
@@ -186,6 +187,81 @@ export async function buildSelection(
     }
   }
 
+  // Dead-slot pruning may keep some redirected duplicate deltas live when the
+  // selected owner still depends on their exact row. Those redirected rows
+  // returned early before resolving their own base chains, so finish that work
+  // now before compaction decides which duplicates remain in the output.
+  //
+  // Footgun: "redirected" does not mean "safe to ignore". A redirected row is
+  // only dead if compaction really removes it. Once pruneUnsafeDeadSlotRedirects
+  // decides the row must stay live, streaming will visit it like any other row
+  // and therefore requires `baseSlots[sel]` to be fully wired first.
+  let retainedRedirectResolutions = 0;
+  while (deadSlots.size > 0) {
+    const safeDeadSlots = pruneUnsafeDeadSlotRedirects(table, deadSlots);
+    const retainedRedirects = collectRetainedRedirectsNeedingBaseResolution(
+      table,
+      deadSlots,
+      safeDeadSlots
+    );
+    if (retainedRedirects.length === 0) break;
+
+    retainedRedirects.sort(
+      (a, b) => table.packSlots[a] - table.packSlots[b] || table.offsets[a] - table.offsets[b]
+    );
+
+    for (const sel of retainedRedirects) {
+      if (options?.signal?.aborted) return undefined;
+      const resolved = await resolveRetainedRedirectBase(
+        table,
+        sel,
+        snapshot,
+        readerStates,
+        dedupMap,
+        duplicateHeaderCache,
+        secondaryQueue,
+        env,
+        log,
+        warnedFlags,
+        options
+      );
+      if (!resolved) return undefined;
+      retainedRedirectResolutions++;
+    }
+
+    while (secondaryQueue.length > 0) {
+      baseChaseIterations++;
+      if (options?.signal?.aborted) return undefined;
+
+      const batch = secondaryQueue;
+      secondaryQueue = [];
+
+      batch.sort(
+        (a, b) => table.packSlots[a] - table.packSlots[b] || table.offsets[a] - table.offsets[b]
+      );
+
+      for (const sel of batch) {
+        if (options?.signal?.aborted) return undefined;
+        const result = await readHeaderAndResolveBase(
+          table,
+          sel,
+          snapshot,
+          readerStates,
+          dedupMap,
+          oidOwners,
+          duplicateHeaderCache,
+          stats,
+          secondaryQueue,
+          env,
+          log,
+          warnedFlags,
+          options
+        );
+        if (!collectResult(sel, result)) return undefined;
+      }
+    }
+  }
+
   // --- Compact dead duplicate-OID slots out of the table. Most redirected
   //     duplicates can collapse onto their surviving owner, but duplicates
   //     that are still needed to keep the base graph acyclic stay live.
@@ -206,6 +282,7 @@ export async function buildSelection(
     duplicateOwnerUpgrades: stats.duplicateOwnerUpgrades,
     duplicateOfsOwnerTakeovers: stats.duplicateOfsOwnerTakeovers,
     duplicateHeaderProbes: stats.duplicateHeaderProbes,
+    retainedRedirectResolutions,
     resolveMs,
     headerReadMs,
     baseChaseIterations,
@@ -354,84 +431,18 @@ async function readHeaderAndResolveBase(
   return resolveDeltaBaseAndFinish();
 
   function resolveDeltaBaseAndFinish(supersedeSel?: number): HeaderResolveResult {
-    // --- OFS_DELTA: base is at (same pack, offset - baseRel) ----------------
-    if (resolvedHeader.type === 6 && resolvedHeader.baseRel !== undefined) {
-      const baseOffset = offset - resolvedHeader.baseRel;
-      const baseIndex = findOffsetIndex(pack.idx, baseOffset);
-      if (baseIndex === undefined) {
-        log.warn("rewrite:missing-ofs-base", { packKey: pack.packKey, offset, baseOffset });
-        return { ok: false };
-      }
-
-      // OFS_DELTA bases stay pack-local. The source pack's offset ordering is
-      // already acyclic; cross-pack canonicalization here can manufacture cycles
-      // when a newer duplicate of the same OID is itself stored as a delta.
-      const baseSel = addEntry(table, dedupMap, packSlot, baseIndex, pack.idx);
-      table.ofsPinned[baseSel] = 1;
-
-      if (baseSel === sel) {
-        // Self-referential OFS_DELTA (e.g. baseRel is zero or points back to
-        // own offset). This indicates pack corruption — abort the selection so
-        // the caller can retry or investigate.
-        log.warn("rewrite:self-referential-delta", {
-          packKey: pack.packKey,
-          offset,
-          deltaType: "ofs",
-          baseRel: resolvedHeader.baseRel,
-        });
-        return { ok: false };
-      }
-      table.baseSlots[sel] = baseSel;
-      if (table.typeCodes[baseSel] === 0 && !table.queuedForHeader[baseSel]) {
-        table.queuedForHeader[baseSel] = 1;
-        secondaryQueue.push(baseSel);
-      }
-    }
-
-    // --- REF_DELTA: base identified by OID, may be in any pack --------------
-    if (resolvedHeader.type === 7 && resolvedHeader.baseOid) {
-      // Store raw base OID bytes for streaming (avoids hex round-trip later)
-      const rawBytes = hexToBytes(resolvedHeader.baseOid);
-      if (!table.baseOidRaw) {
-        table.baseOidRaw = new Uint8Array(table.capacity * 20);
-      }
-      table.baseOidRaw.set(rawBytes, sel * 20);
-
-      // findOidIndex accepts Uint8Array — avoids re-materializing hex string
-      const location = resolveOrderedEntryByOid(snapshot, rawBytes);
-      if (!location) {
-        log.warn("rewrite:missing-ref-base", {
-          packKey: pack.packKey,
-          offset,
-          baseOid: resolvedHeader.baseOid,
-        });
-        return { ok: false };
-      }
-
-      const baseSel = addEntry(
+    if (
+      !resolveDeltaBaseFromHeader(
         table,
+        sel,
+        snapshot,
         dedupMap,
-        location.packSlot,
-        location.entryIndex,
-        location.pack.idx
-      );
-      if (baseSel === sel) {
-        // Self-referential REF_DELTA with no full-object duplicate available.
-        // This pack cannot be rewritten into a topologically valid output.
-        log.warn("rewrite:self-referential-delta", {
-          packKey: pack.packKey,
-          offset,
-          deltaType: "ref",
-          baseOid: resolvedHeader.baseOid,
-        });
-        return { ok: false };
-      }
-
-      table.baseSlots[sel] = baseSel;
-      if (table.typeCodes[baseSel] === 0 && !table.queuedForHeader[baseSel]) {
-        table.queuedForHeader[baseSel] = 1;
-        secondaryQueue.push(baseSel);
-      }
+        secondaryQueue,
+        log,
+        resolvedHeader
+      )
+    ) {
+      return { ok: false };
     }
 
     return {
@@ -440,6 +451,183 @@ async function readHeaderAndResolveBase(
       supersedeSel,
     };
   }
+}
+
+function resolveDeltaBaseFromHeader(
+  table: SelectionTable,
+  sel: number,
+  snapshot: OrderedPackSnapshot,
+  dedupMap: Map<number, number>,
+  secondaryQueue: number[],
+  log: Logger,
+  header: PackHeaderEx
+): boolean {
+  const packSlot = table.packSlots[sel];
+  const pack = snapshot.packs[packSlot];
+  const offset = table.offsets[sel];
+
+  // Shared helper for both the first header-read pass and the retained-
+  // redirect repair pass above. Keeping this logic in one place avoids a
+  // second implementation drifting on subtle rules like OFS pinning or
+  // REF_DELTA base OID storage.
+
+  // --- OFS_DELTA: base is at (same pack, offset - baseRel) ------------------
+  if (header.type === 6 && header.baseRel !== undefined) {
+    const baseOffset = offset - header.baseRel;
+    const baseIndex = findOffsetIndex(pack.idx, baseOffset);
+    if (baseIndex === undefined) {
+      log.warn("rewrite:missing-ofs-base", { packKey: pack.packKey, offset, baseOffset });
+      return false;
+    }
+
+    // OFS_DELTA bases stay pack-local. The source pack's offset ordering is
+    // already acyclic; cross-pack canonicalization here can manufacture cycles
+    // when a newer duplicate of the same OID is itself stored as a delta.
+    const baseSel = addEntry(table, dedupMap, packSlot, baseIndex, pack.idx);
+    table.ofsPinned[baseSel] = 1;
+
+    if (baseSel === sel) {
+      // Self-referential OFS_DELTA (e.g. baseRel is zero or points back to
+      // own offset). This indicates pack corruption — abort the selection so
+      // the caller can retry or investigate.
+      log.warn("rewrite:self-referential-delta", {
+        packKey: pack.packKey,
+        offset,
+        deltaType: "ofs",
+        baseRel: header.baseRel,
+      });
+      return false;
+    }
+    table.baseSlots[sel] = baseSel;
+    if (table.typeCodes[baseSel] === 0 && !table.queuedForHeader[baseSel]) {
+      table.queuedForHeader[baseSel] = 1;
+      secondaryQueue.push(baseSel);
+    }
+  }
+
+  // --- REF_DELTA: base identified by OID, may be in any pack ----------------
+  if (header.type === 7 && header.baseOid) {
+    // Store raw base OID bytes for streaming (avoids hex round-trip later)
+    const rawBytes = hexToBytes(header.baseOid);
+    if (!table.baseOidRaw) {
+      table.baseOidRaw = new Uint8Array(table.capacity * 20);
+    }
+    table.baseOidRaw.set(rawBytes, sel * 20);
+
+    // findOidIndex accepts Uint8Array — avoids re-materializing hex string
+    const location = resolveOrderedEntryByOid(snapshot, rawBytes);
+    if (!location) {
+      log.warn("rewrite:missing-ref-base", {
+        packKey: pack.packKey,
+        offset,
+        baseOid: header.baseOid,
+      });
+      return false;
+    }
+
+    const baseSel = addEntry(
+      table,
+      dedupMap,
+      location.packSlot,
+      location.entryIndex,
+      location.pack.idx
+    );
+    if (baseSel === sel) {
+      // Self-referential REF_DELTA with no full-object duplicate available.
+      // This pack cannot be rewritten into a topologically valid output.
+      log.warn("rewrite:self-referential-delta", {
+        packKey: pack.packKey,
+        offset,
+        deltaType: "ref",
+        baseOid: header.baseOid,
+      });
+      return false;
+    }
+
+    table.baseSlots[sel] = baseSel;
+    if (table.typeCodes[baseSel] === 0 && !table.queuedForHeader[baseSel]) {
+      table.queuedForHeader[baseSel] = 1;
+      secondaryQueue.push(baseSel);
+    }
+  }
+
+  return true;
+}
+
+function collectRetainedRedirectsNeedingBaseResolution(
+  table: SelectionTable,
+  deadSlots: Map<number, number>,
+  safeDeadSlots: Map<number, number>
+): number[] {
+  const retained: number[] = [];
+  for (const [deadSel] of deadSlots) {
+    // `safeDeadSlots` is the subset we are still allowed to remove. When a row
+    // is present in `deadSlots` but absent here, dead-slot pruning decided that
+    // the redirect would manufacture a cycle, so this "dead" row is actually
+    // staying live in the output pack.
+    if (safeDeadSlots.has(deadSel)) continue;
+    const typeCode = table.typeCodes[deadSel];
+    if ((typeCode === 6 || typeCode === 7) && table.baseSlots[deadSel] < 0) {
+      retained.push(deadSel);
+    }
+  }
+  return retained;
+}
+
+async function resolveRetainedRedirectBase(
+  table: SelectionTable,
+  sel: number,
+  snapshot: OrderedPackSnapshot,
+  readerStates: Map<number, PackReadState>,
+  dedupMap: Map<number, number>,
+  duplicateHeaderCache: DuplicateHeaderCache,
+  secondaryQueue: number[],
+  env: Env,
+  log: Logger,
+  warnedFlags: Set<string>,
+  options?: RewriteOptions
+): Promise<boolean> {
+  if (table.baseSlots[sel] >= 0) return true;
+
+  const packSlot = table.packSlots[sel];
+  const pack = snapshot.packs[packSlot];
+  const cacheKey = selectionKey(packSlot, table.entryIndices[sel]);
+  let header = duplicateHeaderCache.get(cacheKey);
+
+  if (header === undefined) {
+    // The common path already memoized this header before issuing the redirect.
+    // Falling back to a reread is correct here, but it should stay rare and
+    // bounded to the retained-redirect edge case.
+    const readState = await ensurePackReadState(
+      env,
+      pack,
+      packSlot,
+      readerStates,
+      log,
+      warnedFlags,
+      options
+    );
+    header = await readSelectedHeader(readState, table.offsets[sel]);
+    duplicateHeaderCache.set(cacheKey, header ? clonePackHeader(header) : null);
+  }
+
+  if (!header) {
+    log.warn("rewrite:header-read-failed", { packKey: pack.packKey, offset: table.offsets[sel] });
+    return false;
+  }
+
+  log.debug("rewrite:retained-redirect-base-resolve", {
+    sel,
+    packKey: pack.packKey,
+    entryIndex: table.entryIndices[sel],
+    typeCode: table.typeCodes[sel],
+  });
+
+  // This intentionally resolves only the retained row's own base edge. Any
+  // newly discovered base rows still flow through the normal secondary queue so
+  // they get the same header-read and duplicate-owner handling as the primary
+  // selection pass.
+  return resolveDeltaBaseFromHeader(table, sel, snapshot, dedupMap, secondaryQueue, log, header);
 }
 
 /**
