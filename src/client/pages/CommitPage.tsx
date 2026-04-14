@@ -73,7 +73,7 @@ export function CommitPage({
 
       <div className="space-y-4">
         <Card>
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm [&>dd]:min-w-0">
             <dt className="font-medium text-zinc-500 dark:text-zinc-400">Author</dt>
             <dd>
               {authorName} &lt;{authorEmail}&gt;{" "}

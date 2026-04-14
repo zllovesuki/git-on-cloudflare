@@ -35,7 +35,7 @@ export function OverviewPage({
     <>
       <RepoNav owner={owner} repo={repo} refEnc={refEnc} showRefDropdown={false} />
       <ProgressBanner progress={progress} />
-      <div className="mt-6 grid gap-6 md:grid-cols-[1fr_2fr]">
+      <div className="mt-6 grid gap-6 md:grid-cols-[1fr_2fr] [&>*]:min-w-0">
         {/* Left column: Refs */}
         <div className="space-y-6">
           <Card>
