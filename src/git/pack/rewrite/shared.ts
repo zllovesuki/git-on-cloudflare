@@ -193,6 +193,79 @@ export function storeSelectionHeader(
   return true;
 }
 
+/**
+ * Compare two selection slots by source-pack traversal order.
+ *
+ * Rewrite header reads and payload streaming both favor `(packSlot, offset)`
+ * ordering so the `SequentialReader` stays on a mostly forward path.
+ */
+export function compareSelectionSlots(
+  table: SelectionTable,
+  leftSel: number,
+  rightSel: number
+): number {
+  const packDiff = table.packSlots[leftSel] - table.packSlots[rightSel];
+  if (packDiff !== 0) return packDiff;
+  return table.offsets[leftSel] - table.offsets[rightSel];
+}
+
+/** Sort selection slots in-place using source-pack traversal order. */
+export function sortSelectionSlots(
+  table: SelectionTable,
+  slots: Uint32Array | number[]
+): Uint32Array | number[] {
+  slots.sort((leftSel, rightSel) => compareSelectionSlots(table, leftSel, rightSel));
+  return slots;
+}
+
+type CopySelectionRowOptions = {
+  preserveTargetOfsPinned?: boolean;
+};
+
+/**
+ * Copy all planner-phase row fields from one selection slot to another.
+ *
+ * This intentionally excludes layout outputs (`outputOffsets`,
+ * `outputHeaderLens`, `outputOrder`) because every row rewrite happens before
+ * topology and output sizing run.
+ *
+ * `baseSlots` and `baseOidRaw` move with the row because they are part of the
+ * row's resolved delta wiring, not derived output state. Callers that need
+ * extra semantics such as queue clearing or OFS pin merging still apply those
+ * adjustments explicitly after the copy.
+ */
+export function copySelectionRow(
+  table: SelectionTable,
+  targetSel: number,
+  sourceSel: number,
+  options?: CopySelectionRowOptions
+): void {
+  const targetPinned = table.ofsPinned[targetSel];
+
+  table.packSlots[targetSel] = table.packSlots[sourceSel];
+  table.entryIndices[targetSel] = table.entryIndices[sourceSel];
+  table.offsets[targetSel] = table.offsets[sourceSel];
+  table.nextOffsets[targetSel] = table.nextOffsets[sourceSel];
+  table.oidsRaw.set(table.oidsRaw.subarray(sourceSel * 20, sourceSel * 20 + 20), targetSel * 20);
+  table.typeCodes[targetSel] = table.typeCodes[sourceSel];
+  table.headerLens[targetSel] = table.headerLens[sourceSel];
+  table.payloadLens[targetSel] = table.payloadLens[sourceSel];
+  table.sizeVarLens[targetSel] = table.sizeVarLens[sourceSel];
+  table.baseSlots[targetSel] = table.baseSlots[sourceSel];
+  table.sizeVarBuf.set(table.sizeVarBuf.subarray(sourceSel * 5, sourceSel * 5 + 5), targetSel * 5);
+  table.queuedForHeader[targetSel] = table.queuedForHeader[sourceSel];
+  table.ofsPinned[targetSel] = options?.preserveTargetOfsPinned
+    ? targetPinned
+    : table.ofsPinned[sourceSel];
+
+  if (table.baseOidRaw) {
+    table.baseOidRaw.set(
+      table.baseOidRaw.subarray(sourceSel * 20, sourceSel * 20 + 20),
+      targetSel * 20
+    );
+  }
+}
+
 export type PackReadState = {
   pack: OrderedPackSnapshotEntry;
   reader: SequentialReader;

@@ -4,6 +4,7 @@ import type { Logger } from "@/common/logger.ts";
 import { findOidIndex, getNextOffsetByIndex } from "@/git/object-store/index.ts";
 import type { PackHeaderEx } from "../packMeta.ts";
 import {
+  copySelectionRow,
   ensurePackReadState,
   readSelectedHeader,
   selectionKey,
@@ -346,20 +347,10 @@ function upgradeOwnerSelectionToFull(
   // fields change to the newly observed full-object duplicate.
   if (table.typeCodes[fullSel] >= 6 || table.typeCodes[ownerSel] < 6) return false;
 
-  table.packSlots[ownerSel] = table.packSlots[fullSel];
-  table.entryIndices[ownerSel] = table.entryIndices[fullSel];
-  table.offsets[ownerSel] = table.offsets[fullSel];
-  table.nextOffsets[ownerSel] = table.nextOffsets[fullSel];
-  table.oidsRaw.set(table.oidsRaw.subarray(fullSel * 20, fullSel * 20 + 20), ownerSel * 20);
-  table.typeCodes[ownerSel] = table.typeCodes[fullSel];
-  table.headerLens[ownerSel] = table.headerLens[fullSel];
-  table.payloadLens[ownerSel] = table.payloadLens[fullSel];
-  table.sizeVarLens[ownerSel] = table.sizeVarLens[fullSel];
-  table.sizeVarBuf.set(table.sizeVarBuf.subarray(fullSel * 5, fullSel * 5 + 5), ownerSel * 5);
+  // Keep the owner slot's pin state intact: children may already require this
+  // exact selection slot to stay the canonical OFS-stable base.
+  copySelectionRow(table, ownerSel, fullSel, { preserveTargetOfsPinned: true });
   table.baseSlots[ownerSel] = -1;
-  if (table.baseOidRaw) {
-    table.baseOidRaw.set(table.baseOidRaw.subarray(fullSel * 20, fullSel * 20 + 20), ownerSel * 20);
-  }
   return true;
 }
 
