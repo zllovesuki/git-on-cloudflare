@@ -232,4 +232,86 @@ describe("pack rewrite cycles", () => {
     expect(table.baseSlots[olderYSel]).toBe(olderXSel);
     expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
   });
+
+  it("retains duplicate rows when removing the newer owner would fold the pinned row onto itself", async () => {
+    const basePayload = new TextEncoder().encode("shared base\n");
+    const childSuffix = new TextEncoder().encode("child\n");
+    const childPayload = new Uint8Array(basePayload.length + childSuffix.length);
+    childPayload.set(basePayload, 0);
+    childPayload.set(childSuffix, basePayload.length);
+
+    const baseOid = await computeOid("blob", basePayload);
+    const childOid = await computeOid("blob", childPayload);
+
+    const newerPackBytes = await buildPack([{ type: "blob", payload: basePayload }]);
+    const olderPackBytes = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid,
+        delta: buildCopyPrefixDelta(basePayload, basePayload.length),
+      },
+      { type: "ofs-delta", baseIndex: 0, delta: buildAppendOnlyDelta(basePayload, childSuffix) },
+    ]);
+
+    const newerKey = `test/rewrite-pinned-self-cycle-newer-${Date.now()}.pack`;
+    const olderKey = `test/rewrite-pinned-self-cycle-older-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(newerKey, newerPackBytes);
+    await env.REPO_BUCKET.put(olderKey, olderPackBytes);
+
+    const newerResolve = await indexTestPack(env, newerKey, newerPackBytes.byteLength);
+    const newerRow: PackCatalogRow = {
+      packKey: newerKey,
+      kind: "receive",
+      state: "active",
+      tier: 0,
+      seqLo: 2,
+      seqHi: 2,
+      objectCount: newerResolve.objectCount,
+      packBytes: newerPackBytes.byteLength,
+      idxBytes: newerResolve.idxBytes,
+      createdAt: Date.now(),
+      supersededBy: null,
+    };
+    const olderResolve = await indexTestPack(env, olderKey, olderPackBytes.byteLength, [newerRow]);
+
+    const selection = await buildSelection(
+      env,
+      {
+        packs: [
+          { packKey: newerKey, packBytes: newerPackBytes.byteLength, idx: newerResolve.idxView },
+          { packKey: olderKey, packBytes: olderPackBytes.byteLength, idx: olderResolve.idxView },
+        ],
+      },
+      [baseOid, childOid],
+      createLogger("error", { service: "test" }),
+      new Set(),
+      {
+        limiter: { run: async (_label, fn) => await fn() },
+        countSubrequest: () => {},
+      }
+    );
+
+    expect(selection).toBeDefined();
+    const table = selection!.table;
+
+    let newerBaseSel = -1;
+    let olderPinnedBaseSel = -1;
+    let childSel = -1;
+    for (let sel = 0; sel < table.count; sel++) {
+      const oid = bytesToHex(table.oidsRaw.subarray(sel * 20, sel * 20 + 20));
+      if (table.packSlots[sel] === 0 && oid === baseOid) newerBaseSel = sel;
+      if (table.packSlots[sel] === 1 && oid === baseOid) olderPinnedBaseSel = sel;
+      if (oid === childOid) childSel = sel;
+    }
+
+    // The pinned duplicate base is allowed to coexist with the newer owner.
+    // Collapsing the duplicate would rewrite the pinned row's base chain to
+    // itself and make the topology cyclic.
+    expect(newerBaseSel).toBeGreaterThanOrEqual(0);
+    expect(olderPinnedBaseSel).toBeGreaterThanOrEqual(0);
+    expect(childSel).toBeGreaterThanOrEqual(0);
+    expect(table.baseSlots[olderPinnedBaseSel]).toBe(newerBaseSel);
+    expect(table.baseSlots[childSel]).toBe(olderPinnedBaseSel);
+    expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
+  });
 });

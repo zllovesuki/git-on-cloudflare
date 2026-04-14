@@ -186,9 +186,9 @@ export async function buildSelection(
     }
   }
 
-  // --- Compact dead duplicate-OID slots out of the table. These are entries
-  //     redirected to another selected owner for the same OID; keeping them
-  //     would produce duplicate OIDs in the output pack.
+  // --- Compact dead duplicate-OID slots out of the table. Most redirected
+  //     duplicates can collapse onto their surviving owner, but duplicates
+  //     that are still needed to keep the base graph acyclic stay live.
   if (deadSlots.size > 0) {
     compactDeadSlots(table, deadSlots, log);
   }
@@ -445,21 +445,24 @@ async function readHeaderAndResolveBase(
 /**
  * Remove dead selection slots and remap baseSel references.
  *
- * Dead slots are duplicate-OID selections redirected to another already-
- * selected owner. Keeping them would produce duplicate OIDs in the output.
- * This runs once after all phases complete, so the cost is acceptable.
+ * Most dead slots are duplicate-OID selections redirected to another already-
+ * selected owner. A small subset may need to stay live when collapsing them
+ * would fold the surviving row's base chain back onto itself. This runs once
+ * after all phases complete, so the extra graph walk is acceptable.
  */
 export function compactDeadSlots(
   table: SelectionTable,
   deadSlots: Map<number, number>,
   log: Logger
 ): void {
+  const safeDeadSlots = pruneUnsafeDeadSlotRedirects(table, deadSlots);
+
   // 1. Redirect baseSel references from dead slots to their targets.
   //    Handles chains (dead → dead → live) by following until stable.
   function resolve(sel: number): number {
     let cur = sel;
-    for (let depth = 0; depth < deadSlots.size + 1; depth++) {
-      const next = deadSlots.get(cur);
+    for (let depth = 0; depth < safeDeadSlots.size + 1; depth++) {
+      const next = safeDeadSlots.get(cur);
       if (next === undefined) return cur;
       cur = next;
     }
@@ -476,7 +479,7 @@ export function compactDeadSlots(
   const remap = new Int32Array(table.count).fill(-1);
   let write = 0;
   for (let read = 0; read < table.count; read++) {
-    if (deadSlots.has(read)) continue;
+    if (safeDeadSlots.has(read)) continue;
     remap[read] = write;
     if (write !== read) {
       table.packSlots[write] = table.packSlots[read];
@@ -515,6 +518,66 @@ export function compactDeadSlots(
     removed: table.count - write,
   });
   table.count = write;
+}
+
+/**
+ * Some duplicate-owner redirects are not safe to compact away.
+ *
+ * If the surviving owner already depends on the duplicate being removed,
+ * redirecting every reference from `dead -> live` would collapse that live
+ * row's base chain back onto itself and manufacture a cycle. Git packs may
+ * legitimately carry duplicate OIDs, so retain those duplicates instead of
+ * forcing a single canonical row in this case.
+ */
+function pruneUnsafeDeadSlotRedirects(
+  table: SelectionTable,
+  deadSlots: Map<number, number>
+): Map<number, number> {
+  const safeDeadSlots = new Map(deadSlots);
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+
+    for (const [deadSel] of safeDeadSlots) {
+      const targetSel = resolveDeadSlotRedirect(deadSel, safeDeadSlots);
+      if (targetSel === deadSel || dependsOnSelectionSlot(table, targetSel, deadSel)) {
+        safeDeadSlots.delete(deadSel);
+        changed = true;
+      }
+    }
+  }
+
+  return safeDeadSlots;
+}
+
+function resolveDeadSlotRedirect(sel: number, deadSlots: Map<number, number>): number {
+  let cur = sel;
+  for (let depth = 0; depth < deadSlots.size + 1; depth++) {
+    const next = deadSlots.get(cur);
+    if (next === undefined) return cur;
+    cur = next;
+  }
+  return cur;
+}
+
+/**
+ * Selection dependencies are a single base chain per row, so checking whether
+ * `startSel` depends on `targetSel` is a bounded linear walk.
+ */
+function dependsOnSelectionSlot(
+  table: SelectionTable,
+  startSel: number,
+  targetSel: number
+): boolean {
+  let cur = startSel;
+  for (let depth = 0; depth < table.count; depth++) {
+    const baseSel = table.baseSlots[cur];
+    if (baseSel < 0) return false;
+    if (baseSel === targetSel) return true;
+    cur = baseSel;
+  }
+  return false;
 }
 
 /** Build a Uint32Array of selection indices sorted by (packSlot, offset). */
