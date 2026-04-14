@@ -246,7 +246,7 @@ describe("pack rewrite cycles", () => {
     expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
   });
 
-  it("retains duplicate rows when removing the newer owner would fold the pinned row onto itself", async () => {
+  it("collapses pinned duplicate rows back into one live owner slot", async () => {
     const basePayload = new TextEncoder().encode("shared base\n");
     const childSuffix = new TextEncoder().encode("child\n");
     const childPayload = new Uint8Array(basePayload.length + childSuffix.length);
@@ -307,28 +307,29 @@ describe("pack rewrite cycles", () => {
     expect(selection).toBeDefined();
     const table = selection!.table;
 
-    let newerBaseSel = -1;
-    let olderPinnedBaseSel = -1;
+    let baseSel = -1;
+    let baseCount = 0;
     let childSel = -1;
     for (let sel = 0; sel < table.count; sel++) {
       const oid = bytesToHex(table.oidsRaw.subarray(sel * 20, sel * 20 + 20));
-      if (table.packSlots[sel] === 0 && oid === baseOid) newerBaseSel = sel;
-      if (table.packSlots[sel] === 1 && oid === baseOid) olderPinnedBaseSel = sel;
+      if (oid === baseOid) {
+        baseSel = sel;
+        baseCount++;
+      }
       if (oid === childOid) childSel = sel;
     }
 
-    // The pinned duplicate base is allowed to coexist with the newer owner.
-    // Collapsing the duplicate would rewrite the pinned row's base chain to
-    // itself and make the topology cyclic.
-    expect(newerBaseSel).toBeGreaterThanOrEqual(0);
-    expect(olderPinnedBaseSel).toBeGreaterThanOrEqual(0);
+    // The planner now rewrites the live owner slot to the safe full-object
+    // encoding instead of keeping both same-OID rows alive in the output pack.
+    expect(baseSel).toBeGreaterThanOrEqual(0);
+    expect(baseCount).toBe(1);
     expect(childSel).toBeGreaterThanOrEqual(0);
-    expect(table.baseSlots[olderPinnedBaseSel]).toBe(newerBaseSel);
-    expect(table.baseSlots[childSel]).toBe(olderPinnedBaseSel);
+    expect(table.baseSlots[baseSel]).toBe(-1);
+    expect(table.baseSlots[childSel]).toBe(baseSel);
     expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
   });
 
-  it("resolves the base chain for redirected duplicate deltas that dead-slot pruning keeps live", async () => {
+  it("repairs redirected duplicate delta bases before collapsing them away", async () => {
     const seedPayload = new TextEncoder().encode("seed\n");
     const xSuffix = new TextEncoder().encode("x\n");
     const xPayload = new Uint8Array(seedPayload.length + xSuffix.length);
@@ -383,35 +384,36 @@ describe("pack rewrite cycles", () => {
     expect(selection).toBeDefined();
     const table = selection!.table;
 
-    const xSels: number[] = [];
+    let xSel = -1;
+    let xCount = 0;
     let childSel = -1;
     for (let sel = 0; sel < table.count; sel++) {
       const oid = bytesToHex(table.oidsRaw.subarray(sel * 20, sel * 20 + 20));
-      if (oid === xOid) xSels.push(sel);
+      if (oid === xOid) {
+        xSel = sel;
+        xCount++;
+      }
       if (oid === childOid) childSel = sel;
     }
 
     const selectedOwnerSel = childSel >= 0 ? table.baseSlots[childSel] : -1;
-    const retainedDuplicateSel = selectedOwnerSel >= 0 ? table.baseSlots[selectedOwnerSel] : -1;
-    const rootBaseSel = retainedDuplicateSel >= 0 ? table.baseSlots[retainedDuplicateSel] : -1;
+    const rootBaseSel = selectedOwnerSel >= 0 ? table.baseSlots[selectedOwnerSel] : -1;
 
-    // Dead-slot pruning keeps the redirected duplicate OFS_DELTA live because
-    // the selected owner still depends on it. That retained row must resolve
-    // its own base chain before streaming, otherwise the rewrite emits a live
-    // delta row without a base reference.
-    expect(xSels).toHaveLength(2);
-    expect(retainedDuplicateSel).toBeGreaterThanOrEqual(0);
-    expect(selectedOwnerSel).toBeGreaterThanOrEqual(0);
+    // The retained duplicate still needs its base chain repaired first, but
+    // the final selection should collapse back to one live x row.
+    expect(xCount).toBe(1);
+    expect(xSel).toBeGreaterThanOrEqual(0);
     expect(childSel).toBeGreaterThanOrEqual(0);
-    expect(table.baseSlots[selectedOwnerSel]).toBe(retainedDuplicateSel);
-    expect(table.baseSlots[childSel]).toBe(selectedOwnerSel);
+    expect(selectedOwnerSel).toBe(xSel);
+    expect(table.baseSlots[childSel]).toBe(xSel);
     expect(rootBaseSel).toBeGreaterThanOrEqual(0);
+    expect(table.baseSlots[xSel]).toBe(rootBaseSel);
     expect(table.baseSlots[rootBaseSel]).toBe(-1);
     expect(table.typeCodes[rootBaseSel]).toBeLessThan(6);
     expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
   });
 
-  it("resolves retained redirected ref-delta rows before streaming reaches them", async () => {
+  it("collapses retained redirected ref-delta rows into the owner slot", async () => {
     const seedPayload = new TextEncoder().encode("seed\n");
     const xSuffix = new TextEncoder().encode("x\n");
     const xPayload = new Uint8Array(seedPayload.length + xSuffix.length);
@@ -473,23 +475,20 @@ describe("pack rewrite cycles", () => {
     }
 
     const selectedOwnerSel = childSel >= 0 ? table.baseSlots[childSel] : -1;
-    const retainedRefSel = selectedOwnerSel >= 0 ? table.baseSlots[selectedOwnerSel] : -1;
-    const rootBaseSel = retainedRefSel >= 0 ? table.baseSlots[retainedRefSel] : -1;
+    const rootBaseSel = selectedOwnerSel >= 0 ? table.baseSlots[selectedOwnerSel] : -1;
 
-    expect(retainedRefSel).toBeGreaterThanOrEqual(0);
     expect(selectedOwnerSel).toBeGreaterThanOrEqual(0);
     expect(childSel).toBeGreaterThanOrEqual(0);
-    expect(table.typeCodes[selectedOwnerSel]).toBe(6);
-    expect(table.typeCodes[retainedRefSel]).toBe(7);
-    expect(table.baseSlots[selectedOwnerSel]).toBe(retainedRefSel);
+    expect(table.typeCodes[selectedOwnerSel]).toBe(7);
     expect(table.baseSlots[childSel]).toBe(selectedOwnerSel);
     expect(rootBaseSel).toBeGreaterThanOrEqual(0);
+    expect(table.baseSlots[selectedOwnerSel]).toBe(rootBaseSel);
     expect(table.baseSlots[rootBaseSel]).toBe(-1);
     expect(table.typeCodes[rootBaseSel]).toBeLessThan(6);
     expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
   });
 
-  it("resolves multi-hop retained redirect chains discovered after the first repair pass", async () => {
+  it("collapses multi-hop retained redirect chains back into one live owner row", async () => {
     const seedPayload = new TextEncoder().encode("seed\n");
     const xSuffix = new TextEncoder().encode("x\n");
     const xPayload = new Uint8Array(seedPayload.length + xSuffix.length);
@@ -553,20 +552,13 @@ describe("pack rewrite cycles", () => {
     }
 
     const selectedOwnerSel = childSel >= 0 ? table.baseSlots[childSel] : -1;
-    const retainedOfsSel = selectedOwnerSel >= 0 ? table.baseSlots[selectedOwnerSel] : -1;
-    const retainedRefSel = retainedOfsSel >= 0 ? table.baseSlots[retainedOfsSel] : -1;
-    const rootBaseSel = retainedRefSel >= 0 ? table.baseSlots[retainedRefSel] : -1;
+    const rootBaseSel = selectedOwnerSel >= 0 ? table.baseSlots[selectedOwnerSel] : -1;
 
     expect(selectedOwnerSel).toBeGreaterThanOrEqual(0);
-    expect(retainedOfsSel).toBeGreaterThanOrEqual(0);
-    expect(retainedRefSel).toBeGreaterThanOrEqual(0);
     expect(rootBaseSel).toBeGreaterThanOrEqual(0);
-    expect(table.typeCodes[selectedOwnerSel]).toBe(6);
-    expect(table.typeCodes[retainedOfsSel]).toBe(6);
-    expect(table.typeCodes[retainedRefSel]).toBe(7);
-    expect(table.baseSlots[selectedOwnerSel]).toBe(retainedOfsSel);
-    expect(table.baseSlots[retainedOfsSel]).toBe(retainedRefSel);
-    expect(table.baseSlots[retainedRefSel]).toBe(rootBaseSel);
+    expect(table.typeCodes[selectedOwnerSel]).toBe(7);
+    expect(table.baseSlots[childSel]).toBe(selectedOwnerSel);
+    expect(table.baseSlots[selectedOwnerSel]).toBe(rootBaseSel);
     expect(table.baseSlots[rootBaseSel]).toBe(-1);
     expect(table.typeCodes[rootBaseSel]).toBeLessThan(6);
     expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
@@ -621,6 +613,13 @@ describe("pack rewrite cycles", () => {
     const verifyKey = `test/rewrite-retained-ref-stream-verify-${Date.now()}.pack`;
     await env.REPO_BUCKET.put(verifyKey, rewrittenPack);
     const verify = await indexTestPack(env, verifyKey, rewrittenPack.byteLength);
-    expect(verify.idxView.count).toBeGreaterThanOrEqual(4);
+    expect(verify.idxView.count).toBe(3);
+
+    const oidSet = new Set<string>();
+    for (let i = 0; i < verify.idxView.count; i++) {
+      const oidBytes = verify.idxView.rawNames.subarray(i * 20, (i + 1) * 20);
+      oidSet.add(bytesToHex(oidBytes));
+    }
+    expect(oidSet.size).toBe(verify.idxView.count);
   });
 });

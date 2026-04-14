@@ -262,9 +262,24 @@ export async function buildSelection(
     }
   }
 
+  // Some redirected duplicates only stayed live because the chosen owner still
+  // depended on their exact row. Keeping both rows in the final pack makes the
+  // rewrite fetchable again, but Git still rejects the output because the same
+  // object OID appears twice. Collapse those cases back to one live row by
+  // rewriting the owner slot to stream the retained duplicate's encoding.
+  //
+  // Footgun: the owner slot index must stay stable here because children may
+  // already point at it. Only the row's source pack position and header/base
+  // metadata change; the selection slot itself remains the canonical owner.
+  let collapsedUnsafeRedirectOwners = 0;
+  if (deadSlots.size > 0) {
+    collapsedUnsafeRedirectOwners = collapseUnsafeRedirectOwners(table, deadSlots, log);
+  }
+
   // --- Compact dead duplicate-OID slots out of the table. Most redirected
-  //     duplicates can collapse onto their surviving owner, but duplicates
-  //     that are still needed to keep the base graph acyclic stay live.
+  //     duplicates can collapse onto their surviving owner. The retained-
+  //     redirect repair above already rewrote the few topology-sensitive cases
+  //     back to one live row before this final compaction pass runs.
   if (deadSlots.size > 0) {
     compactDeadSlots(table, deadSlots, log);
   }
@@ -283,6 +298,7 @@ export async function buildSelection(
     duplicateOfsOwnerTakeovers: stats.duplicateOfsOwnerTakeovers,
     duplicateHeaderProbes: stats.duplicateHeaderProbes,
     retainedRedirectResolutions,
+    collapsedUnsafeRedirectOwners,
     resolveMs,
     headerReadMs,
     baseChaseIterations,
@@ -630,13 +646,115 @@ async function resolveRetainedRedirectBase(
   return resolveDeltaBaseFromHeader(table, sel, snapshot, dedupMap, secondaryQueue, log, header);
 }
 
+function collapseUnsafeRedirectOwners(
+  table: SelectionTable,
+  deadSlots: Map<number, number>,
+  log: Logger
+): number {
+  let collapsed = 0;
+
+  while (true) {
+    const rewrites = collectUnsafeRedirectOwnerRewrites(table, deadSlots);
+    if (rewrites.length === 0) return collapsed;
+
+    rewrites.sort(
+      (a, b) =>
+        table.packSlots[a.targetSel] - table.packSlots[b.targetSel] ||
+        table.offsets[a.targetSel] - table.offsets[b.targetSel]
+    );
+
+    for (const rewrite of rewrites) {
+      rewriteSelectionRowFromSource(table, rewrite.targetSel, rewrite.sourceSel);
+      collapsed++;
+
+      log.debug("rewrite:collapse-unsafe-redirect-owner", {
+        targetSel: rewrite.targetSel,
+        sourceSel: rewrite.sourceSel,
+        packSlot: table.packSlots[rewrite.targetSel],
+        entryIndex: table.entryIndices[rewrite.targetSel],
+        typeCode: table.typeCodes[rewrite.targetSel],
+      });
+    }
+  }
+}
+
+function collectUnsafeRedirectOwnerRewrites(
+  table: SelectionTable,
+  deadSlots: Map<number, number>
+): Array<{ targetSel: number; sourceSel: number }> {
+  const rewrites: Array<{ targetSel: number; sourceSel: number }> = [];
+  const plannedTargets = new Set<number>();
+
+  for (const [deadSel] of deadSlots) {
+    const targetSel = resolveDeadSlotRedirect(deadSel, deadSlots);
+    if (targetSel === deadSel || !dependsOnSelectionSlot(table, targetSel, deadSel)) {
+      continue;
+    }
+    if (plannedTargets.has(targetSel)) continue;
+
+    const sourceSel = findNearestRedirectDependency(table, targetSel, deadSlots);
+    if (sourceSel === undefined) continue;
+
+    rewrites.push({ targetSel, sourceSel });
+    plannedTargets.add(targetSel);
+  }
+
+  return rewrites;
+}
+
+function findNearestRedirectDependency(
+  table: SelectionTable,
+  targetSel: number,
+  deadSlots: Map<number, number>
+): number | undefined {
+  let cur = targetSel;
+  for (let depth = 0; depth < table.count; depth++) {
+    const baseSel = table.baseSlots[cur];
+    if (baseSel < 0) return undefined;
+    if (resolveDeadSlotRedirect(baseSel, deadSlots) === targetSel) {
+      return baseSel;
+    }
+    cur = baseSel;
+  }
+  return undefined;
+}
+
+function rewriteSelectionRowFromSource(
+  table: SelectionTable,
+  targetSel: number,
+  sourceSel: number
+): void {
+  const targetPinned = table.ofsPinned[targetSel];
+
+  table.packSlots[targetSel] = table.packSlots[sourceSel];
+  table.entryIndices[targetSel] = table.entryIndices[sourceSel];
+  table.offsets[targetSel] = table.offsets[sourceSel];
+  table.nextOffsets[targetSel] = table.nextOffsets[sourceSel];
+  table.oidsRaw.set(table.oidsRaw.subarray(sourceSel * 20, sourceSel * 20 + 20), targetSel * 20);
+  table.typeCodes[targetSel] = table.typeCodes[sourceSel];
+  table.headerLens[targetSel] = table.headerLens[sourceSel];
+  table.payloadLens[targetSel] = table.payloadLens[sourceSel];
+  table.sizeVarLens[targetSel] = table.sizeVarLens[sourceSel];
+  table.baseSlots[targetSel] = table.baseSlots[sourceSel];
+  table.sizeVarBuf.set(table.sizeVarBuf.subarray(sourceSel * 5, sourceSel * 5 + 5), targetSel * 5);
+  table.queuedForHeader[targetSel] = 0;
+  table.ofsPinned[targetSel] = targetPinned || table.ofsPinned[sourceSel] ? 1 : 0;
+
+  if (table.baseOidRaw) {
+    table.baseOidRaw.set(
+      table.baseOidRaw.subarray(sourceSel * 20, sourceSel * 20 + 20),
+      targetSel * 20
+    );
+  }
+}
+
 /**
  * Remove dead selection slots and remap baseSel references.
  *
  * Most dead slots are duplicate-OID selections redirected to another already-
- * selected owner. A small subset may need to stay live when collapsing them
- * would fold the surviving row's base chain back onto itself. This runs once
- * after all phases complete, so the extra graph walk is acceptable.
+ * selected owner. The retained-redirect repair above should already have
+ * rewritten any topology-sensitive owners before compaction runs, but this
+ * final graph walk remains as a guardrail around the remap itself.
  */
 export function compactDeadSlots(
   table: SelectionTable,
@@ -713,9 +831,9 @@ export function compactDeadSlots(
  *
  * If the surviving owner already depends on the duplicate being removed,
  * redirecting every reference from `dead -> live` would collapse that live
- * row's base chain back onto itself and manufacture a cycle. Git packs may
- * legitimately carry duplicate OIDs, so retain those duplicates instead of
- * forcing a single canonical row in this case.
+ * row's base chain back onto itself and manufacture a cycle. Callers use this
+ * to find the remaining rows that still need owner-slot rewrites before the
+ * duplicate can be compacted away safely.
  */
 function pruneUnsafeDeadSlotRedirects(
   table: SelectionTable,
