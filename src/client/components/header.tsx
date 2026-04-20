@@ -20,17 +20,19 @@ export function Header({ currentView }: HeaderProps) {
     <header className="sticky top-0 z-50 w-full border-b border-zinc-300 bg-white/80 backdrop-blur-sm dark:border-zinc-800/60 dark:bg-zinc-900/95">
       <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
         <nav className="flex items-center gap-1.5" aria-label="Primary">
-          <a href="/" className="flex items-center gap-3 transition-opacity hover:opacity-80">
-            <span className="inline-grid h-9 w-9 place-items-center rounded-lg bg-accent-500">
-              <GitBranch className="h-5 w-5 text-white" aria-hidden="true" />
+          <a href="/" className="group flex items-center gap-3 transition-opacity hover:opacity-80">
+            <span className="inline-grid h-9 w-9 place-items-center">
+              <GitBranch
+                className="h-6 w-6 text-accent-500 transition-transform duration-200 group-hover:-rotate-6 dark:text-accent-400"
+                strokeWidth={2}
+                aria-hidden="true"
+              />
             </span>
             <span className="hidden sm:block">
               <strong className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                 git-on-cloudflare
               </strong>
-              <small className="block text-xs text-zinc-500">
-                Git hosting on Cloudflare Workers
-              </small>
+              <small className="block text-xs text-zinc-400">Git hosting on Cloudflare</small>
             </span>
           </a>
           <a href="/auth" className={navLinkClass(currentView === "auth")}>
