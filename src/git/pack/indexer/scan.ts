@@ -13,6 +13,7 @@ import { createDigestStream } from "@/common/webtypes.ts";
 import { computeOidBytes } from "@/git/core/objects.ts";
 import { readPackRange } from "@/git/pack/packMeta.ts";
 import { typeCodeToObjectType } from "@/git/object-store/support.ts";
+import { PackRefsBuilder } from "@/git/pack/refIndex.ts";
 
 import { InflateCursor, CRC32_INIT, crc32Update, crc32Finish } from "./inflateCursor.ts";
 import { allocateEntryTable } from "./types.ts";
@@ -319,6 +320,7 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
 
   // ---- 2. Allocate entry table ----
   const table = allocateEntryTable(objectCount);
+  const refsBuilder = new PackRefsBuilder(objectCount);
   const refBaseOids: RefBaseOids = new Uint8Array(objectCount * 20);
   let refDeltaCount = 0;
   let resolvedCount = 0;
@@ -421,6 +423,8 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
       }
       // Non-delta: hash "<type> <size>\0<payload>" to get the OID.
       table.oids.set(await computeOidBytes(baseType, inflated), i * 20);
+      table.objectTypes[i] = header.type;
+      refsBuilder.recordObject(i, baseType, inflated);
       table.resolved[i] = 1;
       table.decompressedSizes[i] = inflated.length;
       resolvedCount++;
@@ -494,5 +498,6 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
     resolvedCount,
     objectCount,
     packChecksum: trailer,
+    refsBuilder,
   };
 }

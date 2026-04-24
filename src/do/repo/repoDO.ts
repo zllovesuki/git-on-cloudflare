@@ -7,7 +7,7 @@ import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 
 import { doPrefix } from "@/keys.ts";
 import { text, createLogger } from "@/common/index.ts";
-import { purgeRepo, removePack } from "./packOperations.ts";
+import { purgeRepo, removePack, type RemovePackResult } from "./packOperations.ts";
 import {
   abortCompactionLease,
   abortReceiveLease,
@@ -312,14 +312,7 @@ export class RepoDurableObject extends DurableObject {
     return await purgeRepo(this.ctx, this.env);
   }
 
-  public async removePack(packKey: string): Promise<{
-    removed: boolean;
-    deletedPack: boolean;
-    deletedIndex: boolean;
-    deletedMetadata: boolean;
-    rejected?: "active-pack" | "non-superseded-pack";
-    packState?: "active" | "superseded" | "unknown";
-  }> {
+  public async removePack(packKey: string): Promise<RemovePackResult> {
     await this.ensureAccessAndAlarm();
     return await removePack(this.ctx, this.env, packKey);
   }

@@ -27,6 +27,11 @@ export function packIndexKey(packKey: string): string {
   return packKey.replace(/\.pack$/, ".idx");
 }
 
+// Given a .pack key, return its matching logical-reference sidecar key.
+export function packRefsKey(packKey: string): string {
+  return packKey.replace(/\.pack$/, ".refs");
+}
+
 // Directory prefix for pack objects under a given DO prefix
 export function r2PackDirPrefix(prefix: string): string {
   return `${prefix}/objects/pack/`;

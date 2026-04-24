@@ -1,4 +1,5 @@
 import type { CacheContext } from "@/cache/index.ts";
+import type { ServeUploadPackPlan } from "../fetch/types.ts";
 
 import { pktLine } from "@/git/core/index.ts";
 import { createLogger } from "@/common/index.ts";
@@ -7,7 +8,11 @@ import { parseFetchArgs } from "../args.ts";
 import { findCommonHaves } from "../closure.ts";
 import { buildAckOnlyResponse } from "../fetch/protocol.ts";
 import { repositoryNotReadyResponse } from "../fetch/responses.ts";
-import { buildServeUploadPackPlan, loadUploadPackSnapshot } from "../fetch/plan.ts";
+import {
+  buildServeUploadPackPlan,
+  FetchPlanRetryError,
+  loadUploadPackSnapshot,
+} from "../fetch/plan.ts";
 import { resolvePackStream } from "../fetch/execute.ts";
 import {
   SidebandProgressMux,
@@ -17,6 +22,17 @@ import {
 } from "../fetch/sideband.ts";
 
 export * from "../fetch/types.ts";
+
+function fetchPlanRetryResponse(error: FetchPlanRetryError): Response {
+  return new Response("Repository fetch planning is not ready, please retry in a few moments.\n", {
+    status: 503,
+    headers: {
+      "Retry-After": String(error.retryAfterSeconds),
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Git-Error": error.reason,
+    },
+  });
+}
 
 export async function handleFetchV2Streaming(
   env: Env,
@@ -62,6 +78,26 @@ export async function handleFetchV2Streaming(
     timeMs: Date.now() - snapshotStart,
   });
 
+  const planStart = Date.now();
+  log.info("stream:fetch:planning-start", {
+    wants: wants.length,
+    haves: haves.length,
+  });
+  let plan: ServeUploadPackPlan;
+  try {
+    plan = await buildServeUploadPackPlan(env, repoId, snapshot, wants, haves, signal, cacheCtx);
+  } catch (error) {
+    if (error instanceof FetchPlanRetryError) {
+      log.warn("stream:fetch:planning-retry", { reason: error.reason });
+      return fetchPlanRetryResponse(error);
+    }
+    throw error;
+  }
+  log.info("stream:fetch:planning-complete", {
+    needed: plan.neededOids.length,
+    timeMs: Date.now() - planStart,
+  });
+
   const responseStream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const streamLog = createLogger(env.LOG_LEVEL, { service: "StreamFetchV2", repoId });
@@ -69,26 +105,6 @@ export async function handleFetchV2Streaming(
         controller.enqueue(pktLine("packfile\n"));
         // Once the response body has started, later failures must travel over
         // Git sideband because the HTTP status line is already committed.
-        const planStart = Date.now();
-        streamLog.info("stream:fetch:planning-start", {
-          wants: wants.length,
-          haves: haves.length,
-        });
-        const plan = await buildServeUploadPackPlan(
-          env,
-          repoId,
-          snapshot,
-          wants,
-          haves,
-          signal,
-          cacheCtx,
-          (message) => emitProgress(controller, message)
-        );
-        streamLog.info("stream:fetch:planning-complete", {
-          needed: plan.neededOids.length,
-          timeMs: Date.now() - planStart,
-        });
-
         emitProgress(controller, "Preparing pack...\n");
 
         const progressMux = new SidebandProgressMux();

@@ -10,6 +10,7 @@ import type { CacheContext } from "@/cache/index.ts";
 import type { Logger } from "@/common/logger.ts";
 import type { IdxView, PackCatalogRow } from "@/git/object-store/types.ts";
 import type { Limiter } from "@/git/operations/limits.ts";
+import type { PackRefsBuilder } from "@/git/pack/refIndex.ts";
 
 // ---------------------------------------------------------------------------
 // Entry table – struct-of-arrays backed by typed arrays
@@ -23,6 +24,13 @@ export interface PackEntryTable {
 
   /** Pack type code: 1=commit, 2=tree, 3=blob, 4=tag, 6=OFS_DELTA, 7=REF_DELTA. */
   types: Uint8Array;
+
+  /**
+   * Final logical object type code: 1=commit, 2=tree, 3=blob, 4=tag.
+   * Delta entries retain their pack type in `types`; this array records the
+   * resolved object type needed by closure sidecars and rematerialization.
+   */
+  objectTypes: Uint8Array;
 
   /** Header length in bytes (type varint + optional delta metadata). */
   headerLens: Uint16Array;
@@ -66,6 +74,7 @@ export function allocateEntryTable(count: number): PackEntryTable {
     count,
     offsets: new Uint32Array(count),
     types: new Uint8Array(count),
+    objectTypes: new Uint8Array(count),
     headerLens: new Uint16Array(count),
     spanEnds: new Uint32Array(count),
     crc32s: new Uint32Array(count),
@@ -88,6 +97,8 @@ export interface ScanResult {
   objectCount: number;
   /** Trailing 20-byte SHA-1 from the pack file. */
   packChecksum: Uint8Array;
+  /** Per-entry logical object reference builder populated as payloads resolve. */
+  refsBuilder?: PackRefsBuilder;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +125,7 @@ export function searchOffsetIndex(sortedOffsets: Uint32Array, target: number): n
 export interface ResolveResult {
   objectCount: number;
   idxBytes: number;
+  refIndexBytes: number;
   idxView: IdxView;
 }
 
@@ -145,6 +157,13 @@ export interface ResolveOptions extends IndexerOptions {
   repoId: string;
   /** Hard byte budget for the base-payload LRU cache (default 32 MiB). */
   lruBudget?: number;
+  /**
+   * Backfill can rebuild the derived `.refs` artifact from an already-active
+   * pack without rewriting the deterministic `.idx` beside it.
+   */
+  writeIdx?: boolean;
+  /** Existing idx view required when `writeIdx` is false. */
+  existingIdxView?: IdxView;
 }
 
 export interface ConnectivityCheckOptions {

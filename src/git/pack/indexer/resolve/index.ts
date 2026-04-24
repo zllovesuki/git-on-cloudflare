@@ -2,7 +2,8 @@
  * Delta resolution and idx writing (Pass 2).
  *
  * Processes entries from the scan result in pack-offset order, resolves delta
- * chains, computes OIDs, and writes a standard Git idx v2 file to R2.
+ * chains, computes OIDs, and writes standard Git idx v2 plus logical-reference
+ * sidecar artifacts to R2.
  *
  * Processing in offset order naturally satisfies the OFS_DELTA dependency
  * ordering (bases are always at lower offsets). REF_DELTA entries are first
@@ -21,7 +22,7 @@ import { applyGitDelta } from "@/git/object-store/delta.ts";
 import { parseIdxView } from "@/git/object-store/idxView.ts";
 import { readObject } from "@/git/object-store/store.ts";
 import { ensureMemo, typeCodeToObjectType } from "@/git/object-store/support.ts";
-import { packIndexKey } from "@/keys.ts";
+import { packIndexKey, packRefsKey } from "@/keys.ts";
 
 import { searchOffsetIndex, getRefBaseOidAt } from "../types.ts";
 import type { ResolveOptions, ResolveResult } from "../types.ts";
@@ -304,6 +305,8 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
 
     storeOid(table, index, await computeOidBytes(baseObj.type, result));
     resolvedTypeCodes[index] = objTypeCode(baseObj.type);
+    table.objectTypes[index] = resolvedTypeCodes[index];
+    scanResult.refsBuilder?.recordObject(index, baseObj.type, result);
     promoteWaitingRefDeltas(
       refLookup,
       index,
@@ -551,6 +554,34 @@ async function putPackIdx(opts: ResolveOptions, idxBuf: Uint8Array): Promise<voi
   });
 }
 
+async function putPackRefs(opts: ResolveOptions, refsBuf: Uint8Array): Promise<void> {
+  const refsKey = packRefsKey(opts.packKey);
+  throwIfAborted(opts.signal, opts.log, "resolve:put-pack-refs");
+  opts.log.info("ref-index:write-start", {
+    packKey: opts.packKey,
+    refsKey,
+    bytes: refsBuf.byteLength,
+  });
+  opts.countSubrequest();
+  try {
+    await opts.limiter.run("r2:put-pack-refs", async () => {
+      await opts.env.REPO_BUCKET.put(refsKey, refsBuf);
+    });
+  } catch (error) {
+    opts.log.error("ref-index:write-error", {
+      packKey: opts.packKey,
+      refsKey,
+      error: String(error),
+    });
+    throw error;
+  }
+  opts.log.info("ref-index:write-complete", {
+    packKey: opts.packKey,
+    refsKey,
+    bytes: refsBuf.byteLength,
+  });
+}
+
 async function writeAndParseIdx(
   opts: ResolveOptions,
   packKey: string,
@@ -561,11 +592,45 @@ async function writeAndParseIdx(
 ): Promise<ResolveResult> {
   throwIfAborted(opts.signal, opts.log, "resolve:write-idx");
   opts.onProgress?.("Writing pack index\n");
-  const idxBuf = await writeIdxV2(table, objectCount, packChecksum);
-  throwIfAborted(opts.signal, opts.log, "resolve:write-idx");
-  await putPackIdx(opts, idxBuf);
-  const idxView = parseIdxView(packKey, idxBuf, packSize);
-  if (!idxView) throw new Error("resolve: failed to parse generated idx");
-  opts.log.info("resolve:done", { objectCount, idxBytes: idxBuf.byteLength });
-  return { objectCount, idxBytes: idxBuf.byteLength, idxView };
+  let idxBytes = 0;
+  let idxView = opts.existingIdxView;
+
+  if (opts.writeIdx !== false) {
+    const idxBuf = await writeIdxV2(table, objectCount, packChecksum);
+    idxBytes = idxBuf.byteLength;
+    throwIfAborted(opts.signal, opts.log, "resolve:write-idx");
+    await putPackIdx(opts, idxBuf);
+    idxView = parseIdxView(packKey, idxBuf, packSize);
+    if (!idxView) throw new Error("resolve: failed to parse generated idx");
+  }
+
+  if (!idxView) {
+    throw new Error("resolve: existing idx view is required when idx writing is disabled");
+  }
+  if (idxView.count !== objectCount || idxView.packSize !== packSize) {
+    throw new Error("resolve: existing idx view does not match resolved pack");
+  }
+
+  opts.onProgress?.("Writing pack reference index\n");
+  const refsBuilder = opts.scanResult.refsBuilder;
+  if (!refsBuilder) {
+    throw new Error("resolve: pack reference builder is required to write .refs");
+  }
+
+  const refsResult = refsBuilder.build({
+    table,
+    objectCount,
+    packBytes: packSize,
+    packChecksum: idxView.packChecksum,
+    idxChecksum: idxView.idxChecksum,
+  });
+  throwIfAborted(opts.signal, opts.log, "resolve:write-pack-refs");
+  await putPackRefs(opts, refsResult.bytes);
+
+  opts.log.info("resolve:done", {
+    objectCount,
+    idxBytes,
+    refIndexBytes: refsResult.refIndexBytes,
+  });
+  return { objectCount, idxBytes, refIndexBytes: refsResult.refIndexBytes, idxView };
 }

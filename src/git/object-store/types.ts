@@ -29,4 +29,8 @@ export type IdxView = {
   /** Entry indices corresponding to each element of sortedOffsets. */
   sortedOffsetIndices: Uint32Array;
   packSize: number;
+  /** Pack checksum copied from the `.idx` trailer. */
+  packChecksum: Uint8Array;
+  /** Checksum of the `.idx` contents before its final checksum field. */
+  idxChecksum: Uint8Array;
 };

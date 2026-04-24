@@ -7,6 +7,7 @@ import { getRepoStub } from "@/common/index.ts";
 import { bytesToHex } from "@/common/hex.ts";
 import { encodeGitObject } from "@/git/core/objects.ts";
 import { concatChunks, decodePktLines } from "@/git";
+import { packIndexKey, packRefsKey } from "@/keys.ts";
 import { buildFetchBody } from "./util/fetch-protocol.ts";
 import {
   deleteLooseObjectCopies,
@@ -249,7 +250,9 @@ describe("streaming compaction", () => {
 
     const supersededPackKeys = (stateAfterCompaction.supersededPacks || []).map((pack) => pack.key);
     const beforeDelete = await collectPackObjects(supersededPackKeys);
-    expect(beforeDelete.every((entry) => entry.exists && entry.idxExists)).toBe(true);
+    expect(beforeDelete.every((entry) => entry.exists && entry.idxExists && entry.refsExists)).toBe(
+      true
+    );
 
     const rawResponse = await SELF.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${pushed.objectOids.at(-3)}&name=README.md`
@@ -279,13 +282,70 @@ describe("streaming compaction", () => {
     expect(deleted.retried).toBe(false);
 
     const afterDelete = await collectPackObjects(supersededPackKeys);
-    expect(afterDelete.every((entry) => !entry.exists && !entry.idxExists)).toBe(true);
+    expect(
+      afterDelete.every((entry) => !entry.exists && !entry.idxExists && !entry.refsExists)
+    ).toBe(true);
 
     // The superseded catalog rows remain visible for admin/debug until explicit cleanup.
     const finalState = await getDebugState(owner, repo);
     expect(finalState.supersededPacks?.length).toBe(4);
 
     void stub;
+  });
+
+  it("admin remove deletes pack, idx, and ref sidecar for a superseded pack", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-compaction-admin-remove");
+    const repoId = `${owner}/${repo}`;
+    const seeded = await seedPackFirstRepo(repoId);
+    await promoteToStreaming(owner, repo);
+
+    await pushOverflowingStreamingHistory({
+      owner,
+      repo,
+      repoId,
+      startingCommitOid: seeded.nextCommit.oid,
+      updates: 4,
+    });
+
+    const compacted = await compactOnce(repoId);
+    expect(compacted.acked).toBe(true);
+    expect(compacted.retried).toBe(false);
+
+    const stateAfterCompaction = await getDebugState(owner, repo);
+    const supersededPackKey = stateAfterCompaction.supersededPacks?.[0]?.key;
+    if (!supersededPackKey) throw new Error("missing superseded pack");
+
+    await expect(env.REPO_BUCKET.head(supersededPackKey)).resolves.toBeTruthy();
+    await expect(env.REPO_BUCKET.head(packIndexKey(supersededPackKey))).resolves.toBeTruthy();
+    await expect(env.REPO_BUCKET.head(packRefsKey(supersededPackKey))).resolves.toBeTruthy();
+
+    const packName = supersededPackKey.split("/").pop();
+    if (!packName) throw new Error("missing pack name");
+
+    const deleteResponse = await SELF.fetch(
+      `https://example.com/${owner}/${repo}/admin/pack/${encodeURIComponent(packName)}`,
+      { method: "DELETE" }
+    );
+    expect(deleteResponse.status).toBe(200);
+    const deleteJson = (await deleteResponse.json()) as {
+      ok?: boolean;
+      deletedPack?: boolean;
+      deletedIndex?: boolean;
+      deletedRefs?: boolean;
+      deletedMetadata?: boolean;
+      packState?: string;
+    };
+    expect(deleteJson.ok).toBe(true);
+    expect(deleteJson.packState).toBe("superseded");
+    expect(deleteJson.deletedPack).toBe(true);
+    expect(deleteJson.deletedIndex).toBe(true);
+    expect(deleteJson.deletedRefs).toBe(true);
+    expect(deleteJson.deletedMetadata).toBe(true);
+
+    await expect(env.REPO_BUCKET.head(supersededPackKey)).resolves.toBeNull();
+    await expect(env.REPO_BUCKET.head(packIndexKey(supersededPackKey))).resolves.toBeNull();
+    await expect(env.REPO_BUCKET.head(packRefsKey(supersededPackKey))).resolves.toBeNull();
   });
 
   it("returns retry when a receive lease appears before compaction commit", async () => {

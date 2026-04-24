@@ -30,7 +30,9 @@ function estimateIdxViewBytes(view: IdxView): number {
     view.offsets.byteLength +
     view.nextOffsetByIndex.byteLength +
     view.sortedOffsets.byteLength +
-    view.sortedOffsetIndices.byteLength
+    view.sortedOffsetIndices.byteLength +
+    view.packChecksum.byteLength +
+    view.idxChecksum.byteLength
   );
 }
 
@@ -78,10 +80,10 @@ export function getOidHexAt(view: IdxView, index: number): string {
   return bytesToHex(view.rawNames.subarray(start, start + 20));
 }
 
-function compareOidAt(view: IdxView, index: number, needle: Uint8Array): number {
+function compareOidAt(view: IdxView, index: number, needle: Uint8Array, needleStart = 0): number {
   const start = index * 20;
   for (let i = 0; i < 20; i++) {
-    const diff = view.rawNames[start + i] - needle[i];
+    const diff = view.rawNames[start + i] - needle[needleStart + i];
     if (diff !== 0) return diff;
   }
   return 0;
@@ -131,11 +133,10 @@ export function getNextOffsetByIndex(view: IdxView, index: number): number | und
   return view.nextOffsetByIndex[index];
 }
 
-export function findOidIndex(view: IdxView, oid: string | Uint8Array): number {
-  const needle = typeof oid === "string" ? hexToBytes(oid.toLowerCase()) : oid;
-  if (needle.length !== 20) return -1;
+export function findOidIndexFromBytes(view: IdxView, needle: Uint8Array, needleStart = 0): number {
+  if (needleStart < 0 || needleStart + 20 > needle.byteLength) return -1;
 
-  const first = needle[0];
+  const first = needle[needleStart];
   const lo = first === 0 ? 0 : view.fanout[first - 1] || 0;
   const hi = (view.fanout[first] || 0) - 1;
   if (hi < lo) return -1;
@@ -144,12 +145,18 @@ export function findOidIndex(view: IdxView, oid: string | Uint8Array): number {
   let right = hi;
   while (left <= right) {
     const mid = (left + right) >> 1;
-    const cmp = compareOidAt(view, mid, needle);
+    const cmp = compareOidAt(view, mid, needle, needleStart);
     if (cmp === 0) return mid;
     if (cmp < 0) left = mid + 1;
     else right = mid - 1;
   }
   return -1;
+}
+
+export function findOidIndex(view: IdxView, oid: string | Uint8Array): number {
+  const needle = typeof oid === "string" ? hexToBytes(oid.toLowerCase()) : oid;
+  if (needle.length !== 20) return -1;
+  return findOidIndexFromBytes(view, needle);
 }
 
 export function parseIdxView(
@@ -226,6 +233,8 @@ export function parseIdxView(
     sortedOffsets,
     sortedOffsetIndices,
     packSize,
+    packChecksum: idxBuf.slice(idxBuf.byteLength - IDX_TRAILER_BYTES, idxBuf.byteLength - 20),
+    idxChecksum: idxBuf.slice(idxBuf.byteLength - 20),
   };
 }
 

@@ -5,8 +5,11 @@
  * removal of specific packs and complete repository purging.
  */
 
+import type { Logger } from "@/common/logger.ts";
+
 import { createLogger } from "@/common";
-import { doPrefix, packIndexKey } from "@/keys.ts";
+import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/git/operations/limits.ts";
+import { doPrefix, packIndexKey, packRefsKey } from "@/keys.ts";
 import {
   deletePackCatalogRows,
   getDb,
@@ -14,6 +17,41 @@ import {
   getPackCatalogRow,
 } from "./db/index.ts";
 import { getActivePackCatalogSnapshot } from "./catalog.ts";
+
+export type RemovePackResult = {
+  removed: boolean;
+  deletedPack: boolean;
+  deletedIndex: boolean;
+  deletedRefs: boolean;
+  deletedMetadata: boolean;
+  rejected?: "active-pack" | "non-superseded-pack";
+  packState?: "active" | "superseded" | "unknown";
+};
+
+async function deletePackArtifact(args: {
+  bucket: R2Bucket;
+  limiter: SubrequestLimiter;
+  key: string;
+  op: string;
+  log: Logger;
+  deletedMessage: string;
+  failedMessage: string;
+}): Promise<boolean> {
+  try {
+    await args.limiter.run(args.op, async () => {
+      await args.bucket.delete(args.key);
+    });
+    args.log.info(args.deletedMessage, { key: args.key, op: args.op });
+    return true;
+  } catch (error) {
+    args.log.error(args.failedMessage, {
+      key: args.key,
+      op: args.op,
+      error: String(error),
+    });
+    return false;
+  }
+}
 
 /**
  * Remove a specific pack file and its associated data
@@ -26,30 +64,18 @@ export async function removePack(
   ctx: DurableObjectState,
   env: Env,
   packKey: string
-): Promise<{
-  removed: boolean;
-  deletedPack: boolean;
-  deletedIndex: boolean;
-  deletedMetadata: boolean;
-  rejected?: "active-pack" | "non-superseded-pack";
-  packState?: "active" | "superseded" | "unknown";
-}> {
+): Promise<RemovePackResult> {
   const log = createLogger(env.LOG_LEVEL, {
     service: "packOperations:removePack",
     doId: ctx.id.toString(),
   });
+  const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
 
-  const result: {
-    removed: boolean;
-    deletedPack: boolean;
-    deletedIndex: boolean;
-    deletedMetadata: boolean;
-    rejected?: "active-pack" | "non-superseded-pack";
-    packState?: "active" | "superseded" | "unknown";
-  } = {
+  const result: RemovePackResult = {
     removed: false,
     deletedPack: false,
     deletedIndex: false,
+    deletedRefs: false,
     deletedMetadata: false,
   };
 
@@ -89,30 +115,44 @@ export async function removePack(
 
     log.info("removing-pack", { packKey: fullPackKey });
 
-    // Delete the pack file from R2
-    try {
-      await env.REPO_BUCKET.delete(fullPackKey);
-      result.deletedPack = true;
-      log.info("deleted-pack-file", { key: fullPackKey });
-    } catch (e) {
-      log.error("failed-to-delete-pack", { key: fullPackKey, error: String(e) });
-    }
+    result.deletedPack = await deletePackArtifact({
+      bucket: env.REPO_BUCKET,
+      limiter,
+      key: fullPackKey,
+      op: "r2:delete-pack",
+      log,
+      deletedMessage: "deleted-pack-file",
+      failedMessage: "failed-to-delete-pack",
+    });
 
-    // Delete the index file from R2 if it exists
     const indexKey = packIndexKey(fullPackKey);
-    try {
-      await env.REPO_BUCKET.delete(indexKey);
-      result.deletedIndex = true;
-      log.info("deleted-index-file", { key: indexKey });
-    } catch (e) {
-      log.debug("no-index-to-delete", { key: indexKey });
-    }
+    result.deletedIndex = await deletePackArtifact({
+      bucket: env.REPO_BUCKET,
+      limiter,
+      key: indexKey,
+      op: "r2:delete-pack-idx",
+      log,
+      deletedMessage: "deleted-index-file",
+      failedMessage: "failed-to-delete-index",
+    });
+
+    const refsKey = packRefsKey(fullPackKey);
+    result.deletedRefs = await deletePackArtifact({
+      bucket: env.REPO_BUCKET,
+      limiter,
+      key: refsKey,
+      op: "r2:delete-pack-refs",
+      log,
+      deletedMessage: "deleted-ref-index-file",
+      failedMessage: "failed-to-delete-ref-index",
+    });
 
     // Remove from pack catalog metadata
     await deletePackCatalogRows(db, [fullPackKey]);
     result.deletedMetadata = true;
 
-    result.removed = result.deletedPack || result.deletedMetadata;
+    result.removed =
+      result.deletedPack || result.deletedIndex || result.deletedRefs || result.deletedMetadata;
 
     log.info("pack-removal-complete", result);
   } catch (e) {

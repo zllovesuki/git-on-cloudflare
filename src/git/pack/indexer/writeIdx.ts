@@ -29,6 +29,19 @@ function compareOids(oids: Uint8Array, a: number, b: number): number {
   return 0;
 }
 
+export function buildOidSortedEntryIndices(
+  table: PackEntryTable,
+  objectCount: number
+): Uint32Array {
+  const sortedIndices = new Uint32Array(objectCount);
+  for (let i = 0; i < objectCount; i++) sortedIndices[i] = i;
+  // Duplicate OIDs are invalid in normal packs but can appear in defensive
+  // tests and malformed inputs. Tie-break by pack entry index so every derived
+  // artifact writes duplicate rows in the same deterministic order.
+  sortedIndices.sort((a, b) => compareOids(table.oids, a * 20, b * 20) || a - b);
+  return sortedIndices;
+}
+
 export async function writeIdxV2(
   table: PackEntryTable,
   objectCount: number,
@@ -37,9 +50,7 @@ export async function writeIdxV2(
   const N = objectCount;
 
   // 1. Build sorted index by OID (raw 20-byte comparison).
-  const sortedIndices = new Uint32Array(N);
-  for (let i = 0; i < N; i++) sortedIndices[i] = i;
-  sortedIndices.sort((a, b) => compareOids(table.oids, a * 20, b * 20));
+  const sortedIndices = buildOidSortedEntryIndices(table, N);
 
   // 2. Count large offsets (>= 0x80000000).
   let largeCount = 0;

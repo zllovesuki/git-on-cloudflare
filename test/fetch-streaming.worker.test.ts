@@ -3,8 +3,17 @@ import { env, SELF } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/git";
 import { handleFetchV2Streaming } from "@/git/operations/uploadStream.ts";
+import {
+  buildServeUploadPackPlan,
+  loadUploadPackSnapshot,
+  planUploadPack,
+} from "@/git/operations/fetch/plan.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 import { asBufferSource } from "@/common/index.ts";
+import { packRefsKey } from "@/keys.ts";
+import { runQueueMessage } from "./util/queue.ts";
+import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first.ts";
+import { makeTracingLimiter } from "./util/pack-indexer.helpers.ts";
 
 function buildFetchBody({
   wants,
@@ -36,6 +45,89 @@ function findBytes(haystack: Uint8Array, needle: Uint8Array): number {
     return i;
   }
   return -1;
+}
+
+async function seedTwoCommitRepo(
+  owner: string,
+  repo: string
+): Promise<{
+  repoId: string;
+  doId: DurableObjectId;
+  getStub: () => DurableObjectStub<RepoDurableObject>;
+  firstCommit: string;
+  secondCommit: string;
+}> {
+  const repoId = `${owner}/${repo}`;
+  const doId = env.REPO_DO.idFromName(repoId);
+  const seeded = await seedPackFirstRepo(repoId);
+
+  return {
+    repoId,
+    doId,
+    getStub: seeded.getStub,
+    firstCommit: seeded.baseCommit.oid,
+    secondCommit: seeded.nextCommit.oid,
+  };
+}
+
+async function postFinalFetch(args: {
+  owner: string;
+  repo: string;
+  wants: string[];
+  haves: string[];
+}): Promise<Response> {
+  const body = buildFetchBody({
+    wants: args.wants,
+    haves: args.haves,
+    done: true,
+  });
+  return await SELF.fetch(`https://example.com/${args.owner}/${args.repo}/git-upload-pack`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-git-upload-pack-request",
+      "Git-Protocol": "version=2",
+    },
+    body: asBufferSource(body),
+  });
+}
+
+async function expectRetryThenBackfillRepair(args: {
+  owner: string;
+  repo: string;
+  repoId: string;
+  doId: DurableObjectId;
+  packKey: string;
+  firstCommit: string;
+  secondCommit: string;
+}): Promise<void> {
+  const retryRes = await postFinalFetch({
+    owner: args.owner,
+    repo: args.repo,
+    wants: [args.secondCommit],
+    haves: [args.firstCommit],
+  });
+  expect(retryRes.status).toBe(503);
+  expect(retryRes.headers.get("Retry-After")).toBe("10");
+  expect(await retryRes.text()).not.toContain("packfile");
+
+  const queueResult = await runQueueMessage({
+    kind: "pack-ref-backfill",
+    doId: args.doId.toString(),
+    repoId: args.repoId,
+    packKey: args.packKey,
+  });
+  expect(queueResult).toEqual({ acked: true, retried: false });
+  await expect(env.REPO_BUCKET.head(packRefsKey(args.packKey))).resolves.toBeTruthy();
+
+  const okRes = await postFinalFetch({
+    owner: args.owner,
+    repo: args.repo,
+    wants: [args.secondCommit],
+    haves: [args.firstCommit],
+  });
+  expect(okRes.status).toBe(200);
+  const okBytes = new Uint8Array(await okRes.arrayBuffer());
+  expect(new TextDecoder().decode(okBytes.subarray(4, 13))).toBe("packfile\n");
 }
 
 describe("git fetch streaming (default)", () => {
@@ -250,6 +342,182 @@ describe("git fetch streaming (default)", () => {
     // Verify it's a valid pack
     const packSig = new TextDecoder().decode(pack.subarray(0, 4));
     expect(packSig).toBe("PACK");
+  });
+
+  it("returns retry before packfile when an active pack ref sidecar is missing and backfill repairs it", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("missing-ref-sidecar");
+    const repoId = `${owner}/${repo}`;
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const { commitOid: firstCommit } = await runDOWithRetry(
+      getStub,
+      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
+    );
+    const { commitOid: secondCommit } = await runDOWithRetry(
+      getStub,
+      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
+    );
+
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.length).toBeGreaterThan(0);
+    const targetPack = activeCatalog[0]!;
+    await env.REPO_BUCKET.delete(packRefsKey(targetPack.packKey));
+
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+    const fetchBody = buildFetchBody({
+      wants: [secondCommit],
+      haves: [firstCommit],
+      done: true,
+    });
+
+    const retryRes = await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body: fetchBody,
+    } as any);
+    expect(retryRes.status).toBe(503);
+    expect(retryRes.headers.get("Retry-After")).toBe("10");
+    expect(await retryRes.text()).not.toContain("packfile");
+
+    const queueResult = await runQueueMessage({
+      kind: "pack-ref-backfill",
+      doId: id.toString(),
+      repoId,
+      packKey: targetPack.packKey,
+    });
+    expect(queueResult).toEqual({ acked: true, retried: false });
+    await expect(env.REPO_BUCKET.head(packRefsKey(targetPack.packKey))).resolves.toBeTruthy();
+
+    const okRes = await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body: fetchBody,
+    } as any);
+    expect(okRes.status).toBe(200);
+    const okBytes = new Uint8Array(await okRes.arrayBuffer());
+    expect(new TextDecoder().decode(okBytes.subarray(4, 13))).toBe("packfile\n");
+  });
+
+  it("plans final fetch from valid sidecars without closure-time range reads", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("valid-ref-sidecar-no-range");
+    const { repoId, firstCommit, secondCommit } = await seedTwoCommitRepo(owner, repo);
+    const cacheCtx = createTestCacheContext(`https://example.com/${repoId}/git-upload-pack`);
+    const labels: string[] = [];
+    cacheCtx.memo = {
+      ...(cacheCtx.memo || {}),
+      limiter: makeTracingLimiter(labels),
+    };
+
+    const snapshotLoad = await loadUploadPackSnapshot(env, repoId, cacheCtx);
+    expect(snapshotLoad.type).toBe("Ready");
+    if (snapshotLoad.type !== "Ready") return;
+
+    labels.length = 0;
+    const plan = await buildServeUploadPackPlan(
+      env,
+      repoId,
+      snapshotLoad.snapshot,
+      [secondCommit],
+      [firstCommit],
+      undefined,
+      cacheCtx
+    );
+
+    expect(plan.type).toBe("Serve");
+    expect(plan.neededOids.length).toBeGreaterThan(0);
+    expect(labels).toContain("r2:get-pack-refs");
+    expect(labels).not.toContain("r2:get-range");
+  });
+
+  it("returns retry before packfile when an active pack ref sidecar is corrupt", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("corrupt-ref-sidecar");
+    const { repoId, doId, getStub, firstCommit, secondCommit } = await seedTwoCommitRepo(
+      owner,
+      repo
+    );
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.length).toBeGreaterThan(0);
+    const targetPack = activeCatalog[0]!;
+    const refsKey = packRefsKey(targetPack.packKey);
+    const refsObject = await env.REPO_BUCKET.get(refsKey);
+    if (!refsObject) throw new Error("missing ref sidecar");
+    const refsBytes = new Uint8Array(await refsObject.arrayBuffer());
+    refsBytes[0] ^= 0xff;
+    await env.REPO_BUCKET.put(refsKey, asBufferSource(refsBytes));
+
+    await expectRetryThenBackfillRepair({
+      owner,
+      repo,
+      repoId,
+      doId,
+      packKey: targetPack.packKey,
+      firstCommit,
+      secondCommit,
+    });
+  });
+
+  it("returns retry before packfile when an active pack ref sidecar is stale", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stale-ref-sidecar");
+    const { repoId, doId, getStub, firstCommit, secondCommit } = await seedTwoCommitRepo(
+      owner,
+      repo
+    );
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.length).toBeGreaterThan(0);
+    const targetPack = activeCatalog[0]!;
+    const refsKey = packRefsKey(targetPack.packKey);
+    const refsObject = await env.REPO_BUCKET.get(refsKey);
+    if (!refsObject) throw new Error("missing ref sidecar");
+    const refsBytes = new Uint8Array(await refsObject.arrayBuffer());
+    refsBytes[40] ^= 0xff;
+    await env.REPO_BUCKET.put(refsKey, asBufferSource(refsBytes));
+
+    await expectRetryThenBackfillRepair({
+      owner,
+      repo,
+      repoId,
+      doId,
+      packKey: targetPack.packKey,
+      firstCommit,
+      secondCommit,
+    });
+  });
+
+  it("does not require pack ref sidecars for negotiation-only upload-pack planning", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("negotiation-ref-sidecar");
+    const repoId = `${owner}/${repo}`;
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const { commitOid: firstCommit } = await runDOWithRetry(
+      getStub,
+      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
+    );
+    const { commitOid: secondCommit } = await runDOWithRetry(
+      getStub,
+      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
+    );
+
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.length).toBeGreaterThan(0);
+    await env.REPO_BUCKET.delete(packRefsKey(activeCatalog[0]!.packKey));
+
+    const plan = await planUploadPack(env, repoId, [secondCommit], [firstCommit], false);
+
+    expect(plan.type).toBe("Serve");
+    if (plan.type !== "Serve") return;
+    expect(plan.neededOids).toEqual([]);
+    expect(plan.ackOids).toContain(firstCommit);
   });
 
   it("handles initial clone (no haves) with streaming", async () => {
@@ -612,7 +880,7 @@ describe("git fetch streaming (default)", () => {
     expect(packStart).toBeGreaterThan(-1);
   });
 
-  it("shows planning progress before pack assembly for initial fetches", async () => {
+  it("emits pack preparation progress before pack data for initial fetches", async () => {
     const owner = "o";
     const repo = uniqueRepoId("early-progress");
     const repoId = `${owner}/${repo}`;
@@ -664,8 +932,7 @@ describe("git fetch streaming (default)", () => {
     const progressMessages = orderedOutput.filter((o) => o.type === "progress");
     expect(progressMessages.length).toBeGreaterThan(0);
 
-    expect(progressMessages[0]?.content).toBe("Selecting objects to send...\n");
-    expect(progressMessages[1]?.content).toBe("Preparing pack...\n");
+    expect(progressMessages[0]?.content).toBe("Preparing pack...\n");
 
     // Verify progress comes before data
     const firstProgressIdx = orderedOutput.findIndex((o) => o.type === "progress");
@@ -676,7 +943,7 @@ describe("git fetch streaming (default)", () => {
     expect(firstProgressIdx).toBeLessThan(firstDataIdx);
   });
 
-  it("shows common-commit progress before pack assembly when haves are present", async () => {
+  it("emits pack preparation progress before pack data when haves are present", async () => {
     const owner = "o";
     const repo = uniqueRepoId("have-progress");
     const repoId = `${owner}/${repo}`;
@@ -732,9 +999,7 @@ describe("git fetch streaming (default)", () => {
     }
 
     const progressMessages = orderedOutput.filter((o) => o.type === "progress");
-    expect(progressMessages[0]?.content).toBe("Finding common commits...\n");
-    expect(progressMessages[1]?.content).toBe("Selecting objects to send...\n");
-    expect(progressMessages[2]?.content).toBe("Preparing pack...\n");
+    expect(progressMessages[0]?.content).toBe("Preparing pack...\n");
 
     const prepareIdx = orderedOutput.findIndex(
       (o) => o.type === "progress" && o.content === "Preparing pack...\n"

@@ -1,5 +1,5 @@
 import { bytesToHex, createDigestStream } from "@/common/index.ts";
-import { packIndexKey } from "@/keys.ts";
+import { packIndexKey, packRefsKey } from "@/keys.ts";
 import { SubrequestLimiter } from "../operations/limits.ts";
 import { appendBytes, cloneBytes } from "./bytes.ts";
 
@@ -192,8 +192,12 @@ async function stageKnownLengthPack(args: {
       packKey: args.packKey,
       packBytes: totalBytes,
       async cleanup() {
-        await args.env.REPO_BUCKET.delete(args.packKey);
-        await args.env.REPO_BUCKET.delete(packIndexKey(args.packKey));
+        await deleteStagedPackArtifacts({
+          env: args.env,
+          packKey: args.packKey,
+          limiter: args.limiter,
+          countSubrequest: args.countSubrequest,
+        });
       },
     };
   } catch (error) {
@@ -204,7 +208,13 @@ async function stageKnownLengthPack(args: {
       await reader.cancel(error);
     } catch {}
     try {
-      await args.env.REPO_BUCKET.delete(args.packKey);
+      await deletePackArtifact({
+        env: args.env,
+        key: args.packKey,
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+        op: "r2:delete-staged-pack",
+      });
     } catch {}
     throw error;
   }
@@ -323,8 +333,12 @@ async function stageMultipartPack(args: {
       packKey: args.packKey,
       packBytes: totalBytes,
       async cleanup() {
-        await args.env.REPO_BUCKET.delete(args.packKey);
-        await args.env.REPO_BUCKET.delete(packIndexKey(args.packKey));
+        await deleteStagedPackArtifacts({
+          env: args.env,
+          packKey: args.packKey,
+          limiter: args.limiter,
+          countSubrequest: args.countSubrequest,
+        });
       },
     };
   } catch (error) {
@@ -335,9 +349,62 @@ async function stageMultipartPack(args: {
       await upload.abort();
     } catch {}
     try {
-      await args.env.REPO_BUCKET.delete(args.packKey);
+      await deletePackArtifact({
+        env: args.env,
+        key: args.packKey,
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+        op: "r2:delete-staged-pack",
+      });
     } catch {}
     throw error;
+  }
+}
+
+async function deletePackArtifact(args: {
+  env: Env;
+  key: string;
+  limiter: SubrequestLimiter;
+  countSubrequest(op: string, n?: number): void;
+  op: string;
+}): Promise<void> {
+  args.countSubrequest(args.op);
+  await args.limiter.run(args.op, async () => {
+    await args.env.REPO_BUCKET.delete(args.key);
+  });
+}
+
+async function deleteStagedPackArtifacts(args: {
+  env: Env;
+  packKey: string;
+  limiter: SubrequestLimiter;
+  countSubrequest(op: string, n?: number): void;
+}): Promise<void> {
+  // Cleanup is intentionally split per artifact so logs and request accounting
+  // can identify which platform call hit the budget or failed.
+  const failures: string[] = [];
+  const artifacts = [
+    { key: args.packKey, op: "r2:delete-staged-pack" },
+    { key: packIndexKey(args.packKey), op: "r2:delete-pack-idx" },
+    { key: packRefsKey(args.packKey), op: "r2:delete-pack-refs" },
+  ];
+
+  for (const artifact of artifacts) {
+    try {
+      await deletePackArtifact({
+        env: args.env,
+        key: artifact.key,
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+        op: artifact.op,
+      });
+    } catch (error) {
+      failures.push(`${artifact.op}:${String(error)}`);
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(`staged pack cleanup failed for ${failures.join(", ")}`);
   }
 }
 

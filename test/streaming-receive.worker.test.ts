@@ -14,7 +14,7 @@ import {
   uniqueRepoId,
 } from "./util/test-helpers.ts";
 import { seedPackFirstRepo } from "./util/pack-first.ts";
-import { doPrefix, r2PackDirPrefix } from "@/keys.ts";
+import { doPrefix, packRefsKey, r2PackDirPrefix } from "@/keys.ts";
 import {
   buildStreamingReceiveBody,
   decodeReceiveSideband,
@@ -255,8 +255,16 @@ describe("streaming receive-pack", () => {
     expect(decoded.progress.some((line) => line.includes("Scanning pack objects"))).toBe(true);
     expect(decoded.progress.some((line) => line.includes("Resolving deltas"))).toBe(true);
     expect(decoded.progress.some((line) => line.includes("Writing pack index"))).toBe(true);
+    expect(decoded.progress.some((line) => line.includes("Writing pack reference index"))).toBe(
+      true
+    );
     expect(decoded.reportStatus).toContain("ok refs/heads/main");
     expect(decoded.fatal).toEqual([]);
+
+    const catalog = await callStubWithRetry(seeded.getStub, (stub) => stub.getActivePackCatalog());
+    const receivedPack = catalog.find((row) => row.packKey.includes("/pack-rx-"));
+    expect(receivedPack).toBeTruthy();
+    await expect(env.REPO_BUCKET.head(packRefsKey(receivedPack!.packKey))).resolves.toBeTruthy();
   });
 
   it("suppresses side-band progress when the client requests quiet", async () => {

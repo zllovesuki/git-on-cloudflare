@@ -14,7 +14,7 @@ import { scanPack, resolveDeltasAndWriteIdx } from "@/git/pack/indexer/index.ts"
 import { rewritePack } from "@/git/pack/rewrite.ts";
 import { loadOrderedPackSnapshot } from "@/git/pack/snapshot.ts";
 import { deleteStagedPack, stagePackToR2, type StagedPackUpload } from "@/git/receive/r2Upload.ts";
-import { doPrefix, packIndexKey, r2PackKey } from "@/keys.ts";
+import { doPrefix, packIndexKey, packRefsKey, r2PackKey } from "@/keys.ts";
 
 const COMPACTION_SUBREQUEST_BUDGET = 7_500;
 const COMPACTION_RETRY_DELAY_SECONDS = 30;
@@ -341,7 +341,9 @@ export async function handleCompactionDeleteMessage(
   try {
     const keysToDelete: string[] = [];
     for (const packKey of body.packKeys) {
-      keysToDelete.push(packKey, packIndexKey(packKey));
+      // Each superseded pack has three derived immutable artifacts in R2:
+      // the pack bytes, the idx, and the logical-reference sidecar.
+      keysToDelete.push(packKey, packIndexKey(packKey), packRefsKey(packKey));
     }
 
     await limiter.run("r2:delete-superseded-packs", async () => {
@@ -349,6 +351,7 @@ export async function handleCompactionDeleteMessage(
     });
     log.info("compaction:delete-complete", {
       packCount: body.packKeys.length,
+      artifactCount: keysToDelete.length,
     });
     message.ack();
   } catch (error) {

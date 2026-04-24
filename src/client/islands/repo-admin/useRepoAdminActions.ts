@@ -61,7 +61,7 @@ export function useRepoAdminActions(owner: string, repo: string) {
   async function removePack(packName: string) {
     const warning =
       `Are you sure you want to remove pack: ${packName}?\n\n` +
-      `This deletes the pack file, its index, and associated metadata.\n\n` +
+      `This deletes the pack file, its index, reference sidecar, and associated metadata.\n\n` +
       `Only superseded packs should be removed during normal operation. ` +
       `Active packs may still be referenced until compaction replaces them.`;
     if (!window.confirm(warning)) {
@@ -75,7 +75,7 @@ export function useRepoAdminActions(owner: string, repo: string) {
       const data = await safeReadJson(response);
       if (readFlag(data, "ok")) {
         window.alert(
-          `Pack removed successfully:\n- Pack file: ${readFlag(data, "deletedPack") ? "deleted" : "not found"}\n- Index file: ${readFlag(data, "deletedIndex") ? "deleted" : "not found"}\n- Metadata: ${readFlag(data, "deletedMetadata") ? "cleaned" : "unchanged"}`
+          `Pack removed successfully:\n- Pack file: ${readFlag(data, "deletedPack") ? "delete requested" : "unchanged"}\n- Index file: ${readFlag(data, "deletedIndex") ? "delete requested" : "unchanged"}\n- Reference sidecar: ${readFlag(data, "deletedRefs") ? "delete requested" : "unchanged"}\n- Metadata: ${readFlag(data, "deletedMetadata") ? "cleaned" : "unchanged"}`
         );
         window.location.reload();
         return;

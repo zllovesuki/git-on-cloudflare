@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { packIndexKey } from "@/keys.ts";
+import { packIndexKey, packRefsKey } from "@/keys.ts";
 import { pushStreamingUpdate } from "./streaming-helpers.ts";
 import { runQueueMessage, type QueueRunResult } from "./queue.ts";
 
@@ -27,13 +27,19 @@ export async function deleteSupersededOnce(
 
 export async function collectPackObjects(
   packKeys: string[]
-): Promise<Array<{ packKey: string; exists: boolean; idxExists: boolean }>> {
-  const checks: Array<{ packKey: string; exists: boolean; idxExists: boolean }> = [];
+): Promise<Array<{ packKey: string; exists: boolean; idxExists: boolean; refsExists: boolean }>> {
+  const checks: Array<{
+    packKey: string;
+    exists: boolean;
+    idxExists: boolean;
+    refsExists: boolean;
+  }> = [];
   for (const packKey of packKeys) {
     checks.push({
       packKey,
       exists: (await env.REPO_BUCKET.head(packKey)) !== null,
       idxExists: (await env.REPO_BUCKET.head(packIndexKey(packKey))) !== null,
+      refsExists: (await env.REPO_BUCKET.head(packRefsKey(packKey))) !== null,
     });
   }
   return checks;

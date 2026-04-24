@@ -9,6 +9,7 @@
 
 import { asBodyInit } from "@/common/webtypes.ts";
 import type { IdxView, PackCatalogRow, PackedObjectResult } from "@/git/object-store/types.ts";
+import type { PackRefView, PackRefViewLoadResult } from "@/git/pack/refIndex.ts";
 
 const CACHE_NAME_JSON = "git-on-cf:json";
 const CACHE_NAME_OBJECTS = "git-on-cf:objects";
@@ -32,6 +33,10 @@ export interface RequestMemo {
   idxViews?: Map<string, IdxView>;
   /** In-flight idx view loads keyed by pack key plus size hint when present */
   idxViewPromises?: Map<string, Promise<IdxView | undefined>>;
+  /** Parsed pack logical-reference sidecars keyed by pack key plus idx checksum */
+  packRefViews?: Map<string, PackRefView>;
+  /** In-flight pack logical-reference sidecar loads keyed by pack key plus idx checksum */
+  packRefViewPromises?: Map<string, Promise<PackRefViewLoadResult>>;
   /** Worker-local packed object results */
   packedObjects?: Map<string, PackedObjectResult | null>;
   /** In-flight worker-local packed object reads */
