@@ -4,7 +4,7 @@
 
 Implement per-pack logical object-reference sidecars and use them for final `git-upload-pack` closure planning. This directly addresses the incident: fetch planning must not read thousands of packed objects from R2 just to discover commit/tree/tag edges.
 
-The pressure test changed the plan in four important ways: sidecar readiness is checked before streaming starts, `.refs` becomes a required artifact for newly active packs, backfill uses the streaming indexer rather than `readObject()` loops, and tree gitlinks are excluded from closure edges.
+The pressure test changed the plan in four important ways: sidecar readiness is checked before streaming starts, `.refs` becomes a required artifact for newly active packs, backfill uses the streaming indexer with existing `.idx` help for tricky `REF_DELTA` bases, and tree gitlinks are excluded from closure edges.
 
 ## Design Decisions
 
@@ -90,8 +90,10 @@ The pressure test changed the plan in four important ways: sidecar readiness is 
   - gets current active catalog through existing DO RPC with limiter/counting
   - acks if target pack is no longer active
   - loads target `.idx`; if valid `.refs` already exists, ack
-  - runs the streaming scan/resolve machinery with current active catalog
-  - writes only the `.refs` sidecar unless the refactor’s artifact API intentionally rewrites deterministic `.idx`
+  - runs the streaming scan/resolve machinery with the target pack excluded from the external-base catalog
+  - seeds same-pack `REF_DELTA` dependency edges from the existing `.idx` so backfill does not fall back to recursive packed-object reads for objects already in the target pack
+  - tries duplicate external-base candidates in catalog order so a newer unusable duplicate does not hide an older materializable base
+  - writes only the `.refs` sidecar; the deterministic `.idx` is already present and must not be rewritten by backfill
   - retries transient R2/DO failures
   - acks deterministic invalid pack/idx failures after logging
 - The DO never reads or writes R2 for backfill.

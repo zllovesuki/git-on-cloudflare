@@ -3,6 +3,7 @@
  */
 
 export * from "./compression.ts";
+export * from "./bytes.ts";
 export * from "./hex.ts";
 export * from "./logger.ts";
 export * from "./response.ts";

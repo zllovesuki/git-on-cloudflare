@@ -3,6 +3,7 @@ import { applyGitDelta } from "@/git/object-store/delta.ts";
 
 import type { PackEntryTable, ResolveOptions } from "../types.ts";
 
+import { typeCodeToObjectType } from "@/git/object-store/support.ts";
 import { getBasePayload } from "./materialize.ts";
 import { promoteReadyInPackDependents, type InPackDependencyQueue } from "./dependencies.ts";
 import { throwIfAborted } from "./errors.ts";
@@ -43,6 +44,8 @@ export async function resolveDeltaEntry(args: ResolveDeltaEntryArgs): Promise<vo
     throw new Error(`resolve: base entry ${bi} is not ready for ${args.index}`);
   }
 
+  if (tryResolveRefsOnlyBlobDelta(args, bi)) return;
+
   const base = await getBasePayload(
     args.resolveOpts,
     bi,
@@ -60,7 +63,11 @@ export async function resolveDeltaEntry(args: ResolveDeltaEntryArgs): Promise<vo
     );
   }
 
-  storeOid(args.table, args.index, await computeOidBytes(base.type, result));
+  if (args.resolveOpts.existingIdxView) {
+    args.table.resolved[args.index] = 1;
+  } else {
+    storeOid(args.table, args.index, await computeOidBytes(base.type, result));
+  }
   args.resolvedTypeCodes[args.index] = objTypeCode(base.type);
   args.table.objectTypes[args.index] = args.resolvedTypeCodes[args.index];
   args.resolveOpts.scanResult.refsBuilder?.recordObject(args.index, base.type, result);
@@ -92,4 +99,42 @@ export async function resolveDeltaEntry(args: ResolveDeltaEntryArgs): Promise<vo
   if (args.isBase[args.index]) {
     args.lru.set(args.index, { type: base.type, payload: result });
   }
+}
+
+function tryResolveRefsOnlyBlobDelta(args: ResolveDeltaEntryArgs, baseIndex: number): boolean {
+  if (!args.resolveOpts.existingIdxView) return false;
+
+  const baseType = typeCodeToObjectType(args.resolvedTypeCodes[baseIndex]);
+  if (baseType !== "blob") return false;
+
+  // `.idx` already carries the final OID for refs-only backfill, and blob
+  // objects have no logical closure edges. Avoid inflating and applying blob
+  // delta chains just to record an empty ref list.
+  args.table.resolved[args.index] = 1;
+  args.resolvedTypeCodes[args.index] = args.resolvedTypeCodes[baseIndex];
+  args.table.objectTypes[args.index] = args.resolvedTypeCodes[args.index];
+  args.resolveOpts.scanResult.refsBuilder?.recordBlob(args.index);
+  if (args.refLookup) {
+    promoteWaitingRefDeltas(
+      args.refLookup,
+      args.index,
+      args.table,
+      args.baseIndex,
+      args.isBase,
+      args.deadlines,
+      args.readyDeferred,
+      args.deferredQueued
+    );
+  }
+  if (args.dependencyQueue && args.readyDeferred && args.deferredQueued) {
+    promoteReadyInPackDependents(
+      args.dependencyQueue,
+      args.index,
+      args.readyDeferred,
+      args.deferredQueued,
+      args.table,
+      args.baseIndex
+    );
+  }
+  return true;
 }

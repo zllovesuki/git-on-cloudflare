@@ -16,11 +16,12 @@
  */
 
 import type { CacheContext } from "@/cache/index.ts";
+import { bytesEqual } from "@/common/bytes.ts";
 import { bytesToHex } from "@/common/hex.ts";
 import { computeOidBytes, objTypeCode } from "@/git/core/objects.ts";
 import { applyGitDelta } from "@/git/object-store/delta.ts";
-import { parseIdxView } from "@/git/object-store/idxView.ts";
-import { readObject } from "@/git/object-store/store.ts";
+import { findOidIndexFromBytes, parseIdxView } from "@/git/object-store/idxView.ts";
+import type { IdxView } from "@/git/object-store/types.ts";
 import { ensureMemo, typeCodeToObjectType } from "@/git/object-store/support.ts";
 import { packIndexKey, packRefsKey } from "@/keys.ts";
 
@@ -36,6 +37,7 @@ import {
   registerInPackDependency,
 } from "./dependencies.ts";
 import { throwIfAborted } from "./errors.ts";
+import { readExternalBaseObject } from "./externalBase.ts";
 import { resolveDeltaEntry, storeOid } from "./helpers.ts";
 import { PayloadLRU } from "./payloadCache.ts";
 import { inflateFromReader, SequentialReader } from "./reader.ts";
@@ -72,6 +74,11 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
   const { table, objectCount, packChecksum } = scanResult;
   const initialResolvedCount = scanResult.resolvedCount;
   const unresolvedCount = objectCount - initialResolvedCount;
+
+  if (opts.existingIdxView) {
+    validateExistingIdxView(opts.existingIdxView, objectCount, packSize, packChecksum);
+    seedEntryOidsFromExistingIdx(scanResult, opts.existingIdxView);
+  }
 
   const resolveCacheCtx = ensureResolveCacheContext(
     opts.cacheCtx,
@@ -137,7 +144,15 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
       throwIfAborted(opts.signal, log, "resolve:ofs-main");
       lru.setCurrentOffset(table.offsets[i]);
       if (table.resolved[i]) {
-        await cacheResolvedBaseIfNeeded(table, i, isBase, resolvedTypeCodes, lru, seqReader);
+        await cacheResolvedBaseIfNeeded(
+          table,
+          i,
+          isBase,
+          resolvedTypeCodes,
+          lru,
+          seqReader,
+          !!opts.existingIdxView
+        );
         continue;
       }
       const bi = baseIndex[i];
@@ -192,7 +207,15 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
   //    Those register in the dependency queue so a late base can wake them in
   //    O(children) time without rescanning the whole deferred set.
   const dependencyQueue = createInPackDependencyQueue(objectCount);
-  buildMixedDependencies(scanResult, isBase, baseIndex, deadlines, refLookup, dependencyQueue);
+  buildMixedDependencies(
+    scanResult,
+    isBase,
+    baseIndex,
+    deadlines,
+    refLookup,
+    dependencyQueue,
+    opts.existingIdxView
+  );
   propagateDeadlines(table, objectCount, baseIndex, deadlines);
   lru.setDeadlines(deadlines);
   await seqReader.preload(table.offsets[0]);
@@ -207,7 +230,15 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
     lru.setCurrentOffset(table.offsets[i]);
 
     if (table.resolved[i]) {
-      await cacheResolvedBaseIfNeeded(table, i, isBase, resolvedTypeCodes, lru, seqReader);
+      await cacheResolvedBaseIfNeeded(
+        table,
+        i,
+        isBase,
+        resolvedTypeCodes,
+        lru,
+        seqReader,
+        !!opts.existingIdxView
+      );
       continue;
     }
 
@@ -290,7 +321,7 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
     // Still no in-pack base after all promotions. At this point a REF_DELTA is
     // a true thin-pack external lookup, so fall back to the active catalog.
     const baseOid = bytesToHex(getRefBaseOidAt(scanResult.refBaseOids, index));
-    const baseObj = await readObject(env, repoId, baseOid, resolveCacheCtx);
+    const baseObj = await readExternalBaseObject(resolveOpts, baseOid);
     if (!baseObj) continue;
 
     lru.setCurrentOffset(table.offsets[index]);
@@ -303,7 +334,11 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
       );
     }
 
-    storeOid(table, index, await computeOidBytes(baseObj.type, result));
+    if (opts.existingIdxView) {
+      table.resolved[index] = 1;
+    } else {
+      storeOid(table, index, await computeOidBytes(baseObj.type, result));
+    }
     resolvedTypeCodes[index] = objTypeCode(baseObj.type);
     table.objectTypes[index] = resolvedTypeCodes[index];
     scanResult.refsBuilder?.recordObject(index, baseObj.type, result);
@@ -411,7 +446,8 @@ function buildMixedDependencies(
   baseIndex: Int32Array,
   deadlines: Uint32Array,
   refLookup: RefBaseLookup,
-  dependencyQueue: InPackDependencyQueue
+  dependencyQueue: InPackDependencyQueue,
+  existingIdxView?: IdxView
 ): void {
   const { table, objectCount } = scanResult;
   for (let i = 0; i < objectCount; i++) {
@@ -438,6 +474,23 @@ function buildMixedDependencies(
     }
 
     if (table.types[i] !== 7) continue;
+    const idxBaseEntry = existingIdxView
+      ? findSamePackRefBaseEntry(scanResult, existingIdxView, i)
+      : -1;
+    if (idxBaseEntry >= 0 && idxBaseEntry !== i) {
+      // Backfill starts from a trusted `.idx`, so it already knows every
+      // same-pack REF_DELTA base OID before the scan result has resolved those
+      // entries. The idx is OID-sorted, so convert through the stored pack
+      // offset before assigning the resolver's pack-entry index.
+      baseIndex[i] = idxBaseEntry;
+      isBase[idxBaseEntry] = 1;
+      deadlines[idxBaseEntry] = Math.max(deadlines[idxBaseEntry], table.offsets[i]);
+      if (!table.resolved[idxBaseEntry]) {
+        registerInPackDependency(dependencyQueue, baseIndex, i);
+      }
+      continue;
+    }
+
     const bi = getResolvedBaseEntry(refLookup, i);
     if (bi >= 0) {
       // This REF_DELTA already points at an in-pack entry whose OID was known
@@ -451,6 +504,86 @@ function buildMixedDependencies(
     // REF lookup so a later resolution can promote it, or the caller can treat
     // it as a thin-pack external base once in-pack promotion is exhausted.
     enqueueWaitingRefDelta(refLookup, i);
+  }
+}
+
+function findSamePackRefBaseEntry(
+  scanResult: ResolveOptions["scanResult"],
+  existingIdxView: IdxView,
+  entryIndex: number
+): number {
+  const oidIndex = findOidIndexFromBytes(existingIdxView, scanResult.refBaseOids, entryIndex * 20);
+  if (oidIndex < 0) return -1;
+
+  let runStart = oidIndex;
+  while (runStart > 0) {
+    if (!idxOidMatchesRefBase(existingIdxView, scanResult.refBaseOids, entryIndex, runStart - 1)) {
+      break;
+    }
+    runStart--;
+  }
+
+  let runEnd = oidIndex;
+  while (runEnd + 1 < existingIdxView.count) {
+    if (!idxOidMatchesRefBase(existingIdxView, scanResult.refBaseOids, entryIndex, runEnd + 1)) {
+      break;
+    }
+    runEnd++;
+  }
+
+  let firstDeltaBase = -1;
+  let sawCurrentEntry = false;
+  for (let scanIndex = runStart; scanIndex <= runEnd; scanIndex++) {
+    const baseOffset = existingIdxView.offsets[scanIndex];
+    const baseEntry = searchOffsetIndex(scanResult.table.offsets, baseOffset);
+    if (baseEntry < 0) continue;
+    if (baseEntry === entryIndex) {
+      sawCurrentEntry = true;
+      continue;
+    }
+    if (scanResult.table.types[baseEntry] < 6) return baseEntry;
+    if (firstDeltaBase < 0) firstDeltaBase = baseEntry;
+  }
+
+  // If the current REF_DELTA is itself in this duplicate-OID run, then the
+  // base OID equals the entry's final OID. Without a full-object duplicate in
+  // the target pack, another delta in the same run may still depend on the true
+  // external base. Let external fallback resolve that acyclic base instead of
+  // manufacturing a same-pack dependency cycle.
+  return sawCurrentEntry ? -1 : firstDeltaBase;
+}
+
+function idxOidMatchesRefBase(
+  existingIdxView: IdxView,
+  refBaseOids: ResolveOptions["scanResult"]["refBaseOids"],
+  entryIndex: number,
+  oidIndex: number
+): boolean {
+  const refStart = entryIndex * 20;
+  const idxStart = oidIndex * 20;
+  for (let offset = 0; offset < 20; offset++) {
+    if (existingIdxView.rawNames[idxStart + offset] !== refBaseOids[refStart + offset]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function seedEntryOidsFromExistingIdx(
+  scanResult: ResolveOptions["scanResult"],
+  existingIdxView: IdxView
+): void {
+  const { table, objectCount } = scanResult;
+  for (let oidIndex = 0; oidIndex < objectCount; oidIndex++) {
+    const baseOffset = existingIdxView.offsets[oidIndex];
+    const entryIndex = searchOffsetIndex(table.offsets, baseOffset);
+    if (entryIndex < 0) {
+      throw new Error("resolve: existing idx view mismatch with scanned pack offsets");
+    }
+    table.oids.set(
+      existingIdxView.rawNames.subarray(oidIndex * 20, oidIndex * 20 + 20),
+      entryIndex * 20
+    );
   }
 }
 
@@ -479,11 +612,13 @@ async function cacheResolvedBaseIfNeeded(
   isBase: Uint8Array,
   resolvedTypeCodes: Uint8Array,
   lru: PayloadLRU,
-  reader: SequentialReader
+  reader: SequentialReader,
+  refsOnlyBackfill: boolean
 ): Promise<void> {
   if (!isBase[index] || lru.get(index)) return;
   const t = typeCodeToObjectType(resolvedTypeCodes[index]);
   if (!t) return;
+  if (refsOnlyBackfill && t === "blob") return;
   const payload = await inflateFromReader(reader, table, index);
   lru.set(index, { type: t, payload });
 }
@@ -540,6 +675,21 @@ function ensureResolveCacheContext(
     resolvedCacheCtx.memo.packCatalog = activeCatalog;
   }
   return resolvedCacheCtx;
+}
+
+function validateExistingIdxView(
+  idxView: IdxView,
+  objectCount: number,
+  packSize: number,
+  packChecksum: Uint8Array
+): void {
+  if (
+    idxView.count !== objectCount ||
+    idxView.packSize !== packSize ||
+    !bytesEqual(idxView.packChecksum, packChecksum)
+  ) {
+    throw new Error("resolve: existing idx view mismatch with resolved pack");
+  }
 }
 
 async function putPackIdx(opts: ResolveOptions, idxBuf: Uint8Array): Promise<void> {
@@ -607,9 +757,7 @@ async function writeAndParseIdx(
   if (!idxView) {
     throw new Error("resolve: existing idx view is required when idx writing is disabled");
   }
-  if (idxView.count !== objectCount || idxView.packSize !== packSize) {
-    throw new Error("resolve: existing idx view does not match resolved pack");
-  }
+  validateExistingIdxView(idxView, objectCount, packSize, packChecksum);
 
   opts.onProgress?.("Writing pack reference index\n");
   const refsBuilder = opts.scanResult.refsBuilder;

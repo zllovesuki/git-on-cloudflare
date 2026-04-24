@@ -67,8 +67,7 @@ function isDeterministicPackFailure(error: unknown): boolean {
     message.includes("mismatch") ||
     message.includes("unsupported") ||
     message.includes("truncated") ||
-    message.includes("cannot fit") ||
-    message.includes("could not be resolved")
+    message.includes("cannot fit")
   );
 }
 
@@ -103,6 +102,12 @@ export async function handlePackRefBackfillMessage(
       message.ack();
       return;
     }
+    const externalBaseCatalog = activeCatalog.filter((row) => row.packKey !== target.packKey);
+    log.debug("ref-index:backfill-resolve-catalog", {
+      packKey: target.packKey,
+      activePacks: activeCatalog.length,
+      externalBasePacks: externalBaseCatalog.length,
+    });
 
     const idxView = await loadIdxView(env, target.packKey, cacheCtx, target.packBytes);
     if (!idxView) {
@@ -133,6 +138,7 @@ export async function handlePackRefBackfillMessage(
       log,
     });
 
+    cacheCtx.memo.packCatalog = externalBaseCatalog;
     const resolveResult = await resolveDeltasAndWriteIdx({
       env,
       packKey: target.packKey,
@@ -141,7 +147,7 @@ export async function handlePackRefBackfillMessage(
       countSubrequest: (n = 1) => countBackfillSubrequest(cacheCtx, log, "r2:resolve-pack", n),
       log,
       scanResult,
-      activeCatalog,
+      activeCatalog: externalBaseCatalog,
       cacheCtx,
       repoId: repoLabel,
       writeIdx: false,

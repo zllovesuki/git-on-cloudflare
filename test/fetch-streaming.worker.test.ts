@@ -14,6 +14,9 @@ import { packRefsKey } from "@/keys.ts";
 import { runQueueMessage } from "./util/queue.ts";
 import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first.ts";
 import { makeTracingLimiter } from "./util/pack-indexer.helpers.ts";
+import { buildAppendOnlyDelta, buildCopyPrefixDelta, buildPack } from "./util/git-pack.ts";
+import { seedPackedRepoState } from "./util/packed-repo.ts";
+import { computeOid, encodeGitObject } from "@/git/core/objects.ts";
 
 function buildFetchBody({
   wants,
@@ -403,6 +406,126 @@ describe("git fetch streaming (default)", () => {
     expect(okRes.status).toBe(200);
     const okBytes = new Uint8Array(await okRes.arrayBuffer());
     expect(new TextDecoder().decode(okBytes.subarray(4, 13))).toBe("packfile\n");
+  });
+
+  it("backfills refs for an already-active same-pack REF_DELTA pack", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("missing-ref-sidecar-ref-delta");
+    const repoId = `${owner}/${repo}`;
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+
+    const baseBlobPayload = new TextEncoder().encode("base\n");
+    const midSuffix = new TextEncoder().encode("mid\n");
+    const finalSuffix = new TextEncoder().encode("final\n");
+    const baseBlob = await encodeGitObject("blob", baseBlobPayload);
+
+    const midPayload = new Uint8Array(baseBlobPayload.length + midSuffix.length);
+    midPayload.set(baseBlobPayload, 0);
+    midPayload.set(midSuffix, baseBlobPayload.length);
+    const midOid = await computeOid("blob", midPayload);
+
+    const finalPayload = new Uint8Array(midPayload.length + finalSuffix.length);
+    finalPayload.set(midPayload, 0);
+    finalPayload.set(finalSuffix, midPayload.length);
+
+    const packBytes = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: midOid,
+        delta: buildAppendOnlyDelta(midPayload, finalSuffix),
+      },
+      {
+        type: "ref-delta",
+        baseOid: baseBlob.oid,
+        delta: buildAppendOnlyDelta(baseBlobPayload, midSuffix),
+      },
+      { type: "blob", payload: baseBlobPayload },
+    ]);
+
+    await seedPackedRepoState({
+      env,
+      repoId,
+      getStub,
+      packs: [{ name: "pack-ref-delta-chain.pack", packBytes }],
+    });
+
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog).toHaveLength(1);
+    const targetPack = activeCatalog[0]!;
+    await env.REPO_BUCKET.delete(packRefsKey(targetPack.packKey));
+
+    const queueResult = await runQueueMessage({
+      kind: "pack-ref-backfill",
+      doId: id.toString(),
+      repoId,
+      packKey: targetPack.packKey,
+    });
+
+    expect(queueResult).toEqual({ acked: true, retried: false });
+    await expect(env.REPO_BUCKET.head(packRefsKey(targetPack.packKey))).resolves.toBeTruthy();
+  });
+
+  it("backfills refs when the newest external duplicate base points back to the target pack", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("missing-ref-sidecar-external-duplicate-cycle");
+    const repoId = `${owner}/${repo}`;
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+
+    const targetPayload = new TextEncoder().encode("target prefix\n");
+    const duplicateSuffix = new TextEncoder().encode("duplicate suffix\n");
+    const duplicatePayload = new Uint8Array(targetPayload.length + duplicateSuffix.length);
+    duplicatePayload.set(targetPayload, 0);
+    duplicatePayload.set(duplicateSuffix, targetPayload.length);
+
+    const targetOid = await computeOid("blob", targetPayload);
+    const duplicateOid = await computeOid("blob", duplicatePayload);
+
+    const olderPack = await buildPack([{ type: "blob", payload: duplicatePayload }]);
+    const targetPack = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: duplicateOid,
+        delta: buildCopyPrefixDelta(duplicatePayload, targetPayload.length),
+      },
+    ]);
+    const newerPack = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: targetOid,
+        delta: buildAppendOnlyDelta(targetPayload, duplicateSuffix),
+      },
+    ]);
+
+    const seeded = await seedPackedRepoState({
+      env,
+      repoId,
+      getStub,
+      // The seeder indexes the reversed list, so this caller order creates
+      // older -> target -> newer catalog history while active reads remain
+      // newest-first.
+      packs: [
+        { name: "pack-newer-duplicate.pack", packBytes: newerPack },
+        { name: "pack-target-cycle.pack", packBytes: targetPack },
+        { name: "pack-older-base.pack", packBytes: olderPack },
+      ],
+    });
+
+    const targetPackKey = seeded.packKeys[1]!;
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.map((row) => row.packKey)).toContain(targetPackKey);
+    await env.REPO_BUCKET.delete(packRefsKey(targetPackKey));
+
+    const queueResult = await runQueueMessage({
+      kind: "pack-ref-backfill",
+      doId: id.toString(),
+      repoId,
+      packKey: targetPackKey,
+    });
+
+    expect(queueResult).toEqual({ acked: true, retried: false });
+    await expect(env.REPO_BUCKET.head(packRefsKey(targetPackKey))).resolves.toBeTruthy();
   });
 
   it("plans final fetch from valid sidecars without closure-time range reads", async () => {

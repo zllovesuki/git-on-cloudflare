@@ -2,7 +2,7 @@ import type { CacheContext } from "@/cache/index.ts";
 import type { GitObjectType } from "@/git/core/index.ts";
 import type { IdxView } from "@/git/object-store/types.ts";
 
-import { bytesToHex, createLogger } from "@/common/index.ts";
+import { bytesEqual, bytesToHex, createLogger } from "@/common/index.ts";
 import { typeCodeToObjectType } from "@/git/object-store/support.ts";
 import { countSubrequest, getLimiter } from "@/git/operations/limits.ts";
 import { packRefsKey } from "@/keys.ts";
@@ -147,14 +147,6 @@ function readUint64(dv: DataView, pos: number): number {
     throw new Error("ref-index: pack byte count exceeds safe integer support");
   }
   return value;
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index++) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
 }
 
 function invalid(kind: PackRefValidationKind, reason: string): PackRefInvalidResult {
@@ -397,6 +389,10 @@ export class PackRefsBuilder {
 
   recordObject(index: number, type: GitObjectType, payload: Uint8Array): void {
     this.rawRefsByEntry[index] = objectRefBytes(type, payload);
+  }
+
+  recordBlob(index: number): void {
+    this.rawRefsByEntry[index] = new Uint8Array(0);
   }
 
   build(args: {

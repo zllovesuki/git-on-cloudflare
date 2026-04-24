@@ -1,5 +1,4 @@
 import { bytesToHex } from "@/common/hex.ts";
-import { readObject } from "@/git/object-store/store.ts";
 import { applyGitDelta } from "@/git/object-store/delta.ts";
 import { typeCodeToObjectType } from "@/git/object-store/support.ts";
 
@@ -7,6 +6,7 @@ import { getRefBaseOidAt } from "../types.ts";
 import type { PackEntryTable, ResolveOptions } from "../types.ts";
 
 import { throwIfAborted } from "./errors.ts";
+import { readExternalBaseObject } from "./externalBase.ts";
 import type { CacheEntry } from "./payloadCache.ts";
 import { PayloadLRU } from "./payloadCache.ts";
 import { inflateFromReader, type SequentialReader } from "./reader.ts";
@@ -76,7 +76,7 @@ async function materializeEntry(
 
     if (table.types[currentIndex] === 7) {
       const baseOid = bytesToHex(getRefBaseOidAt(opts.scanResult.refBaseOids, currentIndex));
-      const obj = await readObject(opts.env, opts.repoId, baseOid, opts.cacheCtx);
+      const obj = await readExternalBaseObject(opts, baseOid);
       if (!obj) throw new Error(`materialize: external base ${baseOid} not found`);
       base = { type: obj.type, payload: obj.payload };
       break;
