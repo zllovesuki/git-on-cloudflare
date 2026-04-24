@@ -1,3 +1,7 @@
+import type { PackRefIndexStatus } from "@/git/pack/refIndex.ts";
+
+export type { PackRefIndexStatus };
+
 export type PackStat = {
   key: string;
   kind: "receive" | "compact" | "legacy";
@@ -9,6 +13,8 @@ export type PackStat = {
   packSize: number;
   indexSize: number;
   hasIndex: boolean;
+  refIndexStatus?: PackRefIndexStatus;
+  refIndexSize?: number;
   createdAt: number;
   supersededBy?: string | null;
 };

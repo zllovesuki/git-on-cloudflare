@@ -9,6 +9,7 @@ import {
   computeStorageMetrics,
   computeCompactionStatus,
   getDefaultBranchFromHead,
+  loadAdminPackRefIndexState,
   loadHeadAndRefsCached,
   type DebugState,
   type RouteRequest,
@@ -29,13 +30,20 @@ export async function handleAdminPage(request: RouteRequest, env: Env, ctx: Exec
 
   const repoId = repoKey(owner, repo);
   const stub = getRepoStub(env, repoId);
+  const cacheCtx = { req: request, ctx };
 
   // Gather admin data in parallel for performance
-  const [state, refsData, progress] = await Promise.all([
+  const [rawState, refsData, progress] = await Promise.all([
     stub.debugState().catch(() => ({}) as Partial<DebugState>),
     loadHeadAndRefsCached(env, request, ctx, repoId),
     getRepoActivity(env, repoId),
   ]);
+  const state = await loadAdminPackRefIndexState({
+    env,
+    repoId,
+    state: rawState,
+    cacheCtx,
+  });
   const head: HeadInfo | undefined = refsData?.head || undefined;
   const refs: Ref[] = refsData?.refs || [];
 

@@ -22,6 +22,7 @@ const OBJECT_LINE_PREFIX = [0x6f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x20]; // "objec
 const TYPE_LINE_PREFIX = [0x74, 0x79, 0x70, 0x65, 0x20]; // "type "
 
 type PackRefValidationKind = "corrupt" | "stale";
+export type PackRefIndexStatus = "present" | "missing" | "unknown";
 
 type PackRefInvalidResult = {
   type: "Invalid";

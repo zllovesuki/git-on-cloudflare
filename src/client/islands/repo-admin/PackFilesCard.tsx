@@ -33,6 +33,20 @@ function PackRow({
 }) {
   const packName = String(packStat.key).split("/").pop() || packStat.key;
   const canDelete = packStat.state === "superseded";
+  // Mirror the Index cell's icon-only treatment. The .refs sidecar is either present,
+  // missing, or its status couldn't be determined — all descriptive context lives in
+  // the tooltip so the table stays visually consistent across rows.
+  const refStatus = packStat.refIndexStatus ?? "unknown";
+  const refSizeSuffix =
+    refStatus === "present" && typeof packStat.refIndexSize === "number"
+      ? ` (${formatSampleBytes(packStat.refIndexSize)})`
+      : "";
+  const refTitle =
+    refStatus === "present"
+      ? `Reference sidecar is present in R2${refSizeSuffix}`
+      : refStatus === "missing"
+        ? "Reference sidecar is missing from R2"
+        : "Reference sidecar status could not be checked";
 
   return (
     <tr className="border-b border-zinc-100 dark:border-zinc-800">
@@ -60,6 +74,20 @@ function PackRow({
           <Check className="inline h-4 w-4 text-green-600 dark:text-green-400" aria-hidden="true" />
         ) : (
           <X className="inline h-4 w-4 text-red-600 dark:text-red-400" aria-hidden="true" />
+        )}
+      </td>
+      <td className="py-2 text-center" title={refTitle}>
+        {refStatus === "present" ? (
+          <Check className="inline h-4 w-4 text-green-600 dark:text-green-400" aria-hidden="true" />
+        ) : refStatus === "missing" ? (
+          <X className="inline h-4 w-4 text-red-600 dark:text-red-400" aria-hidden="true" />
+        ) : (
+          <span
+            className="inline-block font-mono text-xs text-zinc-500 dark:text-zinc-400"
+            aria-hidden="true"
+          >
+            ?
+          </span>
         )}
       </td>
       <td className="py-2 text-center">
@@ -148,6 +176,7 @@ export function PackFilesCard({ packCount, packStats, pending, removePack }: Pac
               <th className="py-2 text-right">Pack Size</th>
               <th className="py-2 text-right">Index Size</th>
               <th className="py-2 text-center">Index</th>
+              <th className="py-2 text-center">Refs</th>
               <th className="py-2 text-center">Actions</th>
             </tr>
           </thead>
@@ -165,7 +194,7 @@ export function PackFilesCard({ packCount, packStats, pending, removePack }: Pac
                 {activeRows.length > 0 ? (
                   <tr className="border-b border-zinc-200 dark:border-zinc-800">
                     <td
-                      colSpan={9}
+                      colSpan={10}
                       className="py-1 text-center text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400"
                     >
                       superseded history

@@ -3,8 +3,8 @@ import { env, SELF } from "cloudflare:test";
 
 import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
 import { computeNeededFast } from "@/git/operations/fetch/neededFast.ts";
+import { packRefsKey } from "@/keys.ts";
 import {
-  callStubWithRetry,
   deleteLooseObjectCopies,
   runDOWithRetry,
   toRequestBody,
@@ -147,6 +147,27 @@ describe("pack-first read path routes", () => {
     expect(oidJson.presence?.hasR2Loose).toBe(false);
     expect(oidJson.presence?.hasPacked).toBeUndefined();
     expect(oidJson.inPacks).toEqual([seeded.packKeys[0]]);
+  });
+
+  it("renders pack .refs sidecar status on the admin page", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("pack-admin-refs-sidecar");
+    const repoId = `${owner}/${repo}`;
+    const seeded = await seedPackFirstRepo(repoId);
+    const packKey = seeded.packKeys[0];
+    if (!packKey) throw new Error("missing seeded pack key");
+
+    const presentResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin`);
+    expect(presentResponse.status).toBe(200);
+    const presentHtml = await presentResponse.text();
+    expect(presentHtml).toContain("Reference sidecar is present in R2");
+
+    await env.REPO_BUCKET.delete(packRefsKey(packKey));
+
+    const missingResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin`);
+    expect(missingResponse.status).toBe(200);
+    const missingHtml = await missingResponse.text();
+    expect(missingHtml).toContain("Reference sidecar is missing from R2");
   });
 
   it("rejects deleting an active pack through the admin route", async () => {
