@@ -1,6 +1,11 @@
 import type { Logger } from "@/common/logger.ts";
 
-import { compareSelectionSlots, copySelectionRow, type SelectionTable } from "./shared.ts";
+import {
+  compareSelectionSlots,
+  copySelectionRow,
+  selectionDependsOn,
+  type SelectionTable,
+} from "./shared.ts";
 
 export function collapseUnsafeRedirectOwners(
   table: SelectionTable,
@@ -114,7 +119,7 @@ export function pruneUnsafeDeadSlotRedirects(
 
     for (const [deadSel] of safeDeadSlots) {
       const targetSel = resolveDeadSlotRedirect(deadSel, safeDeadSlots);
-      if (targetSel === deadSel || dependsOnSelectionSlot(table, targetSel, deadSel)) {
+      if (targetSel === deadSel || selectionDependsOn(table, targetSel, deadSel)) {
         safeDeadSlots.delete(deadSel);
         changed = true;
       }
@@ -133,7 +138,7 @@ function collectUnsafeRedirectOwnerRewrites(
 
   for (const [deadSel] of deadSlots) {
     const targetSel = resolveDeadSlotRedirect(deadSel, deadSlots);
-    if (targetSel === deadSel || !dependsOnSelectionSlot(table, targetSel, deadSel)) {
+    if (targetSel === deadSel || !selectionDependsOn(table, targetSel, deadSel)) {
       continue;
     }
     if (plannedTargets.has(targetSel)) continue;
@@ -187,23 +192,4 @@ function resolveDeadSlotRedirect(sel: number, deadSlots: Map<number, number>): n
     cur = next;
   }
   return cur;
-}
-
-/**
- * Selection dependencies are a single base chain per row, so checking whether
- * `startSel` depends on `targetSel` is a bounded linear walk.
- */
-function dependsOnSelectionSlot(
-  table: SelectionTable,
-  startSel: number,
-  targetSel: number
-): boolean {
-  let cur = startSel;
-  for (let depth = 0; depth < table.count; depth++) {
-    const baseSel = table.baseSlots[cur];
-    if (baseSel < 0) return false;
-    if (baseSel === targetSel) return true;
-    cur = baseSel;
-  }
-  return false;
 }

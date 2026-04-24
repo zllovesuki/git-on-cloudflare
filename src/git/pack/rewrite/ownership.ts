@@ -1,7 +1,7 @@
 import type { OrderedPackSnapshot } from "@/git/operations/fetch/types.ts";
 import type { Logger } from "@/common/logger.ts";
 
-import { findOidIndex, getNextOffsetByIndex } from "@/git/object-store/index.ts";
+import { collectPackedObjectCandidates } from "@/git/object-store/index.ts";
 import type { PackHeaderEx } from "../packMeta.ts";
 import {
   copySelectionRow,
@@ -203,19 +203,6 @@ async function readDuplicateCandidateHeader(
   return cloned;
 }
 
-/**
- * Compare a 20-byte OID at byte position `start` in `rawNames` against a
- * 20-byte needle. Returns 0 on match; mirrors `compareOidAt` in idxView.ts
- * but accepts a raw byte offset instead of an entry index.
- */
-function compareOidBytes(rawNames: Uint8Array, start: number, needle: Uint8Array): number {
-  for (let i = 0; i < 20; i++) {
-    const diff = rawNames[start + i] - needle[i];
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
-
 export async function claimCanonicalOwner(
   table: SelectionTable,
   sel: number,
@@ -375,74 +362,50 @@ async function tryCanonicalizeDeltaSelectionToFull(
   // Scan duplicate runs in caller-provided snapshot order so tie-breaking
   // stays deterministic. The first full-object duplicate wins; if it is
   // already selected, redirect to that row instead of creating a second owner.
-  for (let ps = 0; ps < snapshot.packs.length; ps++) {
-    const altPack = snapshot.packs[ps]!;
-    const hitIndex = findOidIndex(altPack.idx, rawBytes);
-    if (hitIndex < 0) continue;
+  for (const candidate of collectPackedObjectCandidates(snapshot.packs, rawBytes)) {
+    if (candidate.packSlot === packSlot && candidate.objectIndex === entryIndex) continue;
 
-    // Idx files are OID-sorted, so duplicate entries for the same OID are
-    // contiguous. Scan the whole run and pick the first full-object candidate.
-    let scanLo = hitIndex;
-    while (scanLo > 0) {
-      const prevStart = (scanLo - 1) * 20;
-      if (compareOidBytes(altPack.idx.rawNames, prevStart, rawBytes) !== 0) break;
-      scanLo--;
+    const altPack = snapshot.packs[candidate.packSlot]!;
+    const altReadState = await ensurePackReadState(
+      env,
+      altPack,
+      candidate.packSlot,
+      readerStates,
+      log,
+      warnedFlags,
+      options
+    );
+    const altKey = selectionKey(candidate.packSlot, candidate.objectIndex);
+    const altHeader = await readDuplicateCandidateHeader(
+      duplicateHeaderCache,
+      stats,
+      altKey,
+      altReadState,
+      candidate.offset
+    );
+    if (!altHeader || altHeader.type === 6 || altHeader.type === 7) continue;
+
+    const existingOwner = dedupMap.get(altKey);
+    if (existingOwner !== undefined && existingOwner !== sel) {
+      // Keep the original position key pointing at the existing owner so any
+      // OFS bases already resolved against this slot continue to hit the
+      // canonical full-object selection after dead-slot compaction.
+      dedupMap.set(currentKey, existingOwner);
+      return { kind: "redirect", targetSel: existingOwner };
     }
-    let scanHi = hitIndex;
-    while (scanHi < altPack.idx.count - 1) {
-      const nextStart = (scanHi + 1) * 20;
-      if (compareOidBytes(altPack.idx.rawNames, nextStart, rawBytes) !== 0) break;
-      scanHi++;
-    }
 
-    for (let ei = scanLo; ei <= scanHi; ei++) {
-      if (ps === packSlot && ei === entryIndex) continue;
-
-      const altOffset = altPack.idx.offsets[ei];
-      const altNextOffset = getNextOffsetByIndex(altPack.idx, ei);
-      if (altNextOffset === undefined) continue;
-
-      const altReadState = await ensurePackReadState(
-        env,
-        altPack,
-        ps,
-        readerStates,
-        log,
-        warnedFlags,
-        options
-      );
-      const altKey = selectionKey(ps, ei);
-      const altHeader = await readDuplicateCandidateHeader(
-        duplicateHeaderCache,
-        stats,
-        altKey,
-        altReadState,
-        altOffset
-      );
-      if (!altHeader || altHeader.type === 6 || altHeader.type === 7) continue;
-
-      const existingOwner = dedupMap.get(altKey);
-      if (existingOwner !== undefined && existingOwner !== sel) {
-        // Keep the original position key pointing at the existing owner so any
-        // OFS bases already resolved against this slot continue to hit the
-        // canonical full-object selection after dead-slot compaction.
-        dedupMap.set(currentKey, existingOwner);
-        return { kind: "redirect", targetSel: existingOwner };
-      }
-
-      // Replace the selected delta in-place with the verified full-object
-      // duplicate. The original position key intentionally keeps pointing at
-      // `sel` so future OFS lookups collapse onto the same live owner slot.
-      dedupMap.set(altKey, sel);
-      return {
-        kind: "swap",
-        packSlot: ps,
-        entryIndex: ei,
-        offset: altOffset,
-        nextOffset: altNextOffset,
-        header: altHeader,
-      };
-    }
+    // Replace the selected delta in-place with the verified full-object
+    // duplicate. The original position key intentionally keeps pointing at
+    // `sel` so future OFS lookups collapse onto the same live owner slot.
+    dedupMap.set(altKey, sel);
+    return {
+      kind: "swap",
+      packSlot: candidate.packSlot,
+      entryIndex: candidate.objectIndex,
+      offset: candidate.offset,
+      nextOffset: candidate.nextOffset,
+      header: altHeader,
+    };
   }
 
   return { kind: "none" };

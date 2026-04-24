@@ -42,6 +42,144 @@ async function readStreamBytes(stream: ReadableStream<Uint8Array>): Promise<Uint
 }
 
 describe("pack rewrite cycles", () => {
+  it("skips a cyclic selected REF_DELTA base duplicate and chooses an older alternate", async () => {
+    const seedPayload = new TextEncoder().encode("seed\n");
+    const aSuffix = new TextEncoder().encode("a\n");
+    const aPayload = new Uint8Array(seedPayload.length + aSuffix.length);
+    aPayload.set(seedPayload, 0);
+    aPayload.set(aSuffix, seedPayload.length);
+
+    const bSuffix = new TextEncoder().encode("b\n");
+    const bPayload = new Uint8Array(aPayload.length + bSuffix.length);
+    bPayload.set(aPayload, 0);
+    bPayload.set(bSuffix, aPayload.length);
+
+    const aOid = await computeOid("blob", aPayload);
+    const bOid = await computeOid("blob", bPayload);
+
+    const olderPackBytes = await buildPack([
+      { type: "blob", payload: seedPayload },
+      { type: "ofs-delta", baseIndex: 0, delta: buildAppendOnlyDelta(seedPayload, aSuffix) },
+    ]);
+    const middlePackBytes = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: aOid,
+        delta: buildAppendOnlyDelta(aPayload, bSuffix),
+      },
+    ]);
+    const newerPackBytes = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: bOid,
+        delta: buildCopyPrefixDelta(bPayload, aPayload.length),
+      },
+    ]);
+
+    const olderKey = `test/rewrite-ref-cycle-older-${Date.now()}.pack`;
+    const middleKey = `test/rewrite-ref-cycle-middle-${Date.now()}.pack`;
+    const newerKey = `test/rewrite-ref-cycle-newer-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(olderKey, olderPackBytes);
+    await env.REPO_BUCKET.put(middleKey, middlePackBytes);
+    await env.REPO_BUCKET.put(newerKey, newerPackBytes);
+
+    const olderResolve = await indexTestPack(env, olderKey, olderPackBytes.byteLength);
+    const olderRow: PackCatalogRow = {
+      packKey: olderKey,
+      kind: "receive",
+      state: "active",
+      tier: 0,
+      seqLo: 1,
+      seqHi: 1,
+      objectCount: olderResolve.objectCount,
+      packBytes: olderPackBytes.byteLength,
+      idxBytes: olderResolve.idxBytes,
+      createdAt: Date.now(),
+      supersededBy: null,
+    };
+    const middleResolve = await indexTestPack(env, middleKey, middlePackBytes.byteLength, [
+      olderRow,
+    ]);
+    const middleRow: PackCatalogRow = {
+      packKey: middleKey,
+      kind: "receive",
+      state: "active",
+      tier: 0,
+      seqLo: 2,
+      seqHi: 2,
+      objectCount: middleResolve.objectCount,
+      packBytes: middlePackBytes.byteLength,
+      idxBytes: middleResolve.idxBytes,
+      createdAt: Date.now(),
+      supersededBy: null,
+    };
+    const newerResolve = await indexTestPack(env, newerKey, newerPackBytes.byteLength, [
+      middleRow,
+      olderRow,
+    ]);
+
+    const snapshot = {
+      packs: [
+        { packKey: newerKey, packBytes: newerPackBytes.byteLength, idx: newerResolve.idxView },
+        { packKey: middleKey, packBytes: middlePackBytes.byteLength, idx: middleResolve.idxView },
+        { packKey: olderKey, packBytes: olderPackBytes.byteLength, idx: olderResolve.idxView },
+      ],
+    };
+    const rewriteOptions = {
+      limiter: { run: async <T>(_label: string, fn: () => Promise<T>) => await fn() },
+      countSubrequest: () => {},
+    };
+
+    const selection = await buildSelection(
+      env,
+      snapshot,
+      [aOid],
+      createLogger("error", { service: "test" }),
+      new Set(),
+      rewriteOptions
+    );
+
+    expect(selection).toBeDefined();
+    const table = selection!.table;
+
+    let aSel = -1;
+    let aCount = 0;
+    let bSel = -1;
+    let seedSel = -1;
+    for (let sel = 0; sel < table.count; sel++) {
+      const oid = bytesToHex(table.oidsRaw.subarray(sel * 20, sel * 20 + 20));
+      if (oid === aOid) {
+        aSel = sel;
+        aCount++;
+      }
+      if (oid === bOid) bSel = sel;
+      if (table.typeCodes[sel] < 6 && oid !== aOid && oid !== bOid) seedSel = sel;
+    }
+
+    expect(aCount).toBe(1);
+    expect(aSel).toBeGreaterThanOrEqual(0);
+    expect(bSel).toBeGreaterThanOrEqual(0);
+    expect(seedSel).toBeGreaterThanOrEqual(0);
+    expect(table.baseSlots[aSel]).toBe(seedSel);
+    expect(table.baseSlots[bSel]).toBe(aSel);
+    expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
+
+    const stream = await rewritePack(env, snapshot, [aOid], rewriteOptions);
+    expect(stream).toBeDefined();
+    const rewrittenPack = await readStreamBytes(stream!);
+
+    const verifyKey = `test/rewrite-ref-cycle-verify-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(verifyKey, rewrittenPack);
+    const verify = await indexTestPack(env, verifyKey, rewrittenPack.byteLength);
+
+    const oidSet = new Set<string>();
+    for (let i = 0; i < verify.idxView.count; i++) {
+      const oidBytes = verify.idxView.rawNames.subarray(i * 20, (i + 1) * 20);
+      oidSet.add(bytesToHex(oidBytes));
+    }
+    expect(oidSet.size).toBe(verify.idxView.count);
+  });
+
   it("does not create an artificial cycle when an older OFS base has a newer duplicate OID", async () => {
     const basePayload = new TextEncoder().encode("shared\n");
     const suffix = new TextEncoder().encode("extra\n");

@@ -4,7 +4,7 @@ import type { Logger } from "@/common/logger.ts";
 import type { PackHeaderEx } from "../packMeta.ts";
 
 import { hexToBytes } from "@/common/index.ts";
-import { findOffsetIndex } from "@/git/object-store/index.ts";
+import { findOffsetIndex, findOidRunInIdx } from "@/git/object-store/index.ts";
 import {
   claimCanonicalOwner,
   clonePackHeader,
@@ -16,7 +16,7 @@ import {
   ensurePackReadState,
   growSelectionTable,
   readSelectedHeader,
-  resolveOrderedEntryByOid,
+  selectionDependsOn,
   selectionKey,
   setSelectionEntryIdentity,
   storeSelectionHeader,
@@ -36,6 +36,11 @@ import {
 export type HeaderResolveResult =
   | { ok: true; ofsBaseCanonicalized: boolean; redirectTo?: number; supersedeSel?: number }
   | { ok: false };
+
+type RefDeltaBaseChoice = {
+  baseSel: number;
+  candidateCount: number;
+};
 
 /**
  * Add a (packSlot, entryIndex) pair to the selection table if not already
@@ -259,24 +264,27 @@ export function resolveDeltaBaseFromHeader(
     }
     table.baseOidRaw.set(rawBytes, sel * 20);
 
-    // findOidIndex accepts Uint8Array — avoids re-materializing hex string
-    const location = resolveOrderedEntryByOid(snapshot, rawBytes);
-    if (!location) {
-      log.warn("rewrite:missing-ref-base", {
+    const choice = chooseRefDeltaBase(
+      table,
+      sel,
+      snapshot,
+      dedupMap,
+      log,
+      rawBytes,
+      header.baseOid
+    );
+    if (choice.baseSel < 0) {
+      log.warn("rewrite:ref-base-cycle-unresolved", {
+        sel,
         packKey: pack.packKey,
         offset,
         baseOid: header.baseOid,
+        candidateCount: choice.candidateCount,
       });
       return false;
     }
 
-    const baseSel = addEntry(
-      table,
-      dedupMap,
-      location.packSlot,
-      location.entryIndex,
-      location.pack.idx
-    );
+    const baseSel = choice.baseSel;
     if (baseSel === sel) {
       // Self-referential REF_DELTA with no full-object duplicate available.
       // This pack cannot be rewritten into a topologically valid output.
@@ -297,4 +305,60 @@ export function resolveDeltaBaseFromHeader(
   }
 
   return true;
+}
+
+/**
+ * Choose a REF_DELTA base by scanning duplicate OID runs in snapshot order.
+ *
+ * The hot path only uses the already-loaded idx views and the partially wired
+ * selection table. If a duplicate candidate is already selected, adding
+ * `sel -> candidateSel` must not make the selected base chain cycle back into
+ * `sel`; otherwise the chooser falls through to the next duplicate candidate.
+ */
+function chooseRefDeltaBase(
+  table: SelectionTable,
+  sel: number,
+  snapshot: OrderedPackSnapshot,
+  dedupMap: Map<number, number>,
+  log: Logger,
+  rawBytes: Uint8Array,
+  baseOid: string
+): RefDeltaBaseChoice {
+  const currentPackSlot = table.packSlots[sel];
+  const currentEntryIndex = table.entryIndices[sel];
+  let candidateCount = 0;
+
+  for (let candidatePackSlot = 0; candidatePackSlot < snapshot.packs.length; candidatePackSlot++) {
+    const candidatePack = snapshot.packs[candidatePackSlot]!;
+    const run = findOidRunInIdx(candidatePack.idx, rawBytes);
+    if (!run) continue;
+
+    for (let entryIndex = run.startIndex; entryIndex <= run.endIndex; entryIndex++) {
+      candidateCount++;
+      if (candidatePackSlot === currentPackSlot && entryIndex === currentEntryIndex) {
+        continue;
+      }
+
+      const candidateKey = selectionKey(candidatePackSlot, entryIndex);
+      const candidateSel = dedupMap.get(candidateKey);
+      if (candidateSel !== undefined) {
+        if (candidateSel === sel || selectionDependsOn(table, candidateSel, sel)) {
+          log.debug("rewrite:ref-base-candidate-cycle-skipped", {
+            sel,
+            baseOid,
+            candidatePackSlot,
+            candidateEntryIndex: entryIndex,
+            selectedCandidateSel: candidateSel,
+          });
+          continue;
+        }
+        return { baseSel: candidateSel, candidateCount };
+      }
+
+      const baseSel = addEntry(table, dedupMap, candidatePackSlot, entryIndex, candidatePack.idx);
+      return { baseSel, candidateCount };
+    }
+  }
+
+  return { baseSel: -1, candidateCount };
 }

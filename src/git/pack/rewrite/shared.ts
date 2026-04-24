@@ -8,7 +8,7 @@ import type { IdxView } from "@/git/object-store/types.ts";
 import type { PackHeaderEx } from "../packMeta.ts";
 
 import { createLogger } from "@/common/index.ts";
-import { findOidIndex, getNextOffsetByIndex } from "@/git/object-store/index.ts";
+import { findFirstPackedObjectCandidate, getNextOffsetByIndex } from "@/git/object-store/index.ts";
 import { SequentialReader } from "@/git/pack/indexer/resolve/reader.ts";
 import { readPackHeaderExFromBuf, readPackRange } from "../packMeta.ts";
 
@@ -218,6 +218,27 @@ export function sortSelectionSlots(
   return slots;
 }
 
+/**
+ * Selection dependencies are a single base chain per row, so checking whether
+ * `startSel` depends on `targetSel` is a bounded linked-list walk. The helper
+ * intentionally follows only `baseSlots`; callers use it in hot paths before
+ * any output graph has been allocated.
+ */
+export function selectionDependsOn(
+  table: SelectionTable,
+  startSel: number,
+  targetSel: number
+): boolean {
+  let cur = startSel;
+  for (let depth = 0; depth < table.count; depth++) {
+    const baseSel = table.baseSlots[cur];
+    if (baseSel < 0) return false;
+    if (baseSel === targetSel) return true;
+    cur = baseSel;
+  }
+  return false;
+}
+
 type CopySelectionRowOptions = {
   preserveTargetOfsPinned?: boolean;
 };
@@ -407,12 +428,12 @@ export function resolveOrderedEntryByOid(
   snapshot: OrderedPackSnapshot,
   oid: string | Uint8Array
 ): { packSlot: number; pack: OrderedPackSnapshotEntry; entryIndex: number } | undefined {
-  for (let packSlot = 0; packSlot < snapshot.packs.length; packSlot++) {
-    const pack = snapshot.packs[packSlot];
-    const entryIndex = findOidIndex(pack.idx, oid);
-    if (entryIndex >= 0) {
-      return { packSlot, pack, entryIndex };
-    }
-  }
-  return undefined;
+  const candidate = findFirstPackedObjectCandidate(snapshot.packs, oid);
+  if (!candidate) return undefined;
+
+  return {
+    packSlot: candidate.packSlot,
+    pack: snapshot.packs[candidate.packSlot]!,
+    entryIndex: candidate.objectIndex,
+  };
 }
