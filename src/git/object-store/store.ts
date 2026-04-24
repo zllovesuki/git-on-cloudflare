@@ -1,28 +1,21 @@
 import type { CacheContext } from "@/cache/index.ts";
 import type { Logger } from "@/common/logger.ts";
 import type { PackedObjectResult } from "./types.ts";
-import type { Limiter } from "@/git/operations/limits.ts";
-import type { PackHeaderEx } from "@/git/pack/packMeta.ts";
 
-import { createBlobFromBytes, inflate } from "@/common/index.ts";
+import { createBlobFromBytes } from "@/common/index.ts";
 import { parseCommitRefs, parseTagTarget, parseTreeChildOids } from "@/git/core/index.ts";
 import {
   MAX_SIMULTANEOUS_CONNECTIONS,
   countSubrequest,
   getLimiter,
 } from "@/git/operations/limits.ts";
-import { readPackHeaderExFromBuf, readPackRange } from "@/git/pack/packMeta.ts";
-import { applyGitDelta } from "./delta.ts";
-import { findOffsetIndex, getNextOffsetByIndex, getOidHexAt } from "./idxView.ts";
 import { findObject } from "./lookup.ts";
+import { materializePackedObjectCandidate } from "./materialize.ts";
 import {
   ensureMemo,
   getPackedObjectStoreLogger,
   logOnce,
-  logPackedObjectMismatch,
   type ResolvedLocation,
-  toPackedObjectResult,
-  typeCodeToObjectType,
 } from "./support.ts";
 
 function countPackedSubrequest(
@@ -38,26 +31,21 @@ function countPackedSubrequest(
   });
 }
 
-async function readPackedEntry(
+async function readObjectFromLocation(
   env: Env,
+  repoId: string,
   location: ResolvedLocation,
-  limiter: Limiter,
   cacheCtx: CacheContext | undefined,
-  log: Logger
-): Promise<
-  | {
-      header: PackHeaderEx;
-      compressed: Uint8Array;
-    }
-  | undefined
-> {
-  const entryLength = location.nextOffset - location.offset;
-  if (entryLength <= 0) return undefined;
+  visited: Set<string>
+): Promise<PackedObjectResult | undefined> {
+  const limiter = getLimiter(cacheCtx);
+  const log = getPackedObjectStoreLogger(env, repoId);
 
-  // Read one contiguous entry span instead of "header + compressed payload" as
-  // separate range reads. That keeps the common read path to a single R2 fetch
-  // per packed base object and still lets us parse delta metadata locally.
-  const entry = await readPackRange(env, location.pack.packKey, location.offset, entryLength, {
+  // Object-store reads intentionally keep first-hit REF_DELTA semantics. The
+  // indexer backfill path is the only caller that tries alternate duplicates.
+  return await materializePackedObjectCandidate({
+    env,
+    candidate: location,
     limiter,
     countSubrequest: (n?: number) => {
       countPackedSubrequest(
@@ -66,71 +54,19 @@ async function readPackedEntry(
         {
           op: "r2:get-pack-entry",
           oid: location.oid,
-          packKey: location.pack.packKey,
+          packKey: location.source.packKey,
         },
         "packed-read-entry-soft-budget-warned",
         n
       );
     },
+    log,
+    cyclePolicy: "throw",
+    resolveRefBase: async (baseOid, nextVisited) => {
+      return await readObject(env, repoId, baseOid, cacheCtx, nextVisited);
+    },
+    visited,
   });
-  if (!entry) return undefined;
-
-  const header = readPackHeaderExFromBuf(entry, 0);
-  if (!header) return undefined;
-  const compressed = entry.subarray(header.headerLen);
-  return { header, compressed };
-}
-
-async function readObjectFromLocation(
-  env: Env,
-  repoId: string,
-  location: ResolvedLocation,
-  cacheCtx: CacheContext | undefined,
-  visited: Set<string>
-): Promise<PackedObjectResult | undefined> {
-  const visitKey = `${location.pack.packKey}#${location.objectIndex}`;
-  if (visited.has(visitKey)) throw new Error("pack object recursion cycle");
-  visited.add(visitKey);
-  try {
-    const limiter = getLimiter(cacheCtx);
-    const log = getPackedObjectStoreLogger(env, repoId);
-    const entry = await readPackedEntry(env, location, limiter, cacheCtx, log);
-    if (!entry) return undefined;
-    const inflated = await inflate(entry.compressed);
-
-    const baseType = typeCodeToObjectType(entry.header.type);
-    if (baseType) return toPackedObjectResult(location, baseType, inflated);
-
-    let base: PackedObjectResult | undefined;
-    if (entry.header.type === 6) {
-      const baseOffset = location.offset - (entry.header.baseRel || 0);
-      const baseIndex = findOffsetIndex(location.idx, baseOffset);
-      if (baseIndex === undefined) return undefined;
-      const baseNextOffset = getNextOffsetByIndex(location.idx, baseIndex);
-      if (baseNextOffset === undefined) return undefined;
-      base = await readObjectFromLocation(
-        env,
-        repoId,
-        {
-          pack: location.pack,
-          idx: location.idx,
-          objectIndex: baseIndex,
-          offset: baseOffset,
-          nextOffset: baseNextOffset,
-          oid: getOidHexAt(location.idx, baseIndex),
-        },
-        cacheCtx,
-        visited
-      );
-    } else if (entry.header.type === 7 && entry.header.baseOid) {
-      base = await readObject(env, repoId, entry.header.baseOid, cacheCtx, visited);
-    }
-    if (!base) return undefined;
-
-    return toPackedObjectResult(location, base.type, applyGitDelta(base.payload, inflated));
-  } finally {
-    visited.delete(visitKey);
-  }
 }
 
 export async function readObject(

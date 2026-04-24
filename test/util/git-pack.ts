@@ -108,6 +108,19 @@ export function buildAppendOnlyDelta(base: Uint8Array, suffix: Uint8Array): Uint
 }
 
 /**
+ * Build a delta whose result is the leading `prefixLength` bytes of `base`.
+ */
+export function buildCopyPrefixDelta(base: Uint8Array, prefixLength: number): Uint8Array {
+  if (!Number.isInteger(prefixLength) || prefixLength < 0 || prefixLength > base.length) {
+    throw new Error(`invalid delta prefix length: ${prefixLength}`);
+  }
+
+  const parts: Uint8Array[] = [encodeDeltaVarint(base.length), encodeDeltaVarint(prefixLength)];
+  if (prefixLength > 0) parts.push(encodeDeltaCopy(0, prefixLength));
+  return concatChunks(parts);
+}
+
+/**
  * Build a Git pack file from objects, including delta entries used by pack-only tests.
  */
 export async function buildPack(objects: PackBuildEntry[]): Promise<Uint8Array> {

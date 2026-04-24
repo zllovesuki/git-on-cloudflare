@@ -1,7 +1,8 @@
 import type { CacheContext } from "@/cache/index.ts";
 
-import { getOidHexAt, findOidIndex, getNextOffsetByIndex, loadIdxView } from "./idxView.ts";
 import { loadActivePackCatalog } from "./catalog.ts";
+import { findFirstPackedObjectCandidate, type IndexedPackSource } from "./candidates.ts";
+import { loadIdxView } from "./idxView.ts";
 import {
   ensureMemo,
   getPackedObjectStoreLogger,
@@ -25,12 +26,13 @@ export async function findObject(
     const idx = await loadIdxView(env, pack.packKey, cacheCtx, pack.packBytes);
     if (!idx) continue;
 
-    const objectIndex = findOidIndex(idx, oid);
-    if (objectIndex < 0) continue;
-
-    const offset = idx.offsets[objectIndex];
-    const noff = getNextOffsetByIndex(idx, objectIndex);
-    if (noff === undefined) continue;
+    const source: IndexedPackSource = {
+      packKey: pack.packKey,
+      packBytes: pack.packBytes,
+      idx,
+    };
+    const candidate = findFirstPackedObjectCandidate([source], oid);
+    if (!candidate) continue;
 
     logOnce(cacheCtx, "packed-chosen-pack-logged", () => {
       log.debug("chosen-pack", {
@@ -41,12 +43,8 @@ export async function findObject(
     });
 
     return {
-      pack,
-      idx,
-      objectIndex,
-      offset,
-      nextOffset: noff,
-      oid: getOidHexAt(idx, objectIndex),
+      ...candidate,
+      packSlot: packsScanned - 1,
     };
   }
 

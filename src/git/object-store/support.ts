@@ -1,16 +1,10 @@
 import type { CacheContext } from "@/cache/index.ts";
-import type { IdxView, PackCatalogRow, PackedObjectResult } from "./types.ts";
+import type { PackedObjectCandidate } from "./candidates.ts";
+import type { PackedObjectResult } from "./types.ts";
 
 import { createLogger } from "@/common/index.ts";
 
-export type ResolvedLocation = {
-  pack: PackCatalogRow;
-  idx: IdxView;
-  objectIndex: number;
-  offset: number;
-  nextOffset: number;
-  oid: string;
-};
+export type ResolvedLocation = PackedObjectCandidate;
 
 export function typeCodeToObjectType(typeCode: number) {
   switch (typeCode) {
@@ -61,7 +55,7 @@ export function toPackedObjectResult(
   payload: Uint8Array
 ): PackedObjectResult {
   return {
-    packKey: location.pack.packKey,
+    packKey: location.source.packKey,
     objectIndex: location.objectIndex,
     offset: location.offset,
     nextOffset: location.nextOffset,
