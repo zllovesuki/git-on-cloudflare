@@ -59,8 +59,21 @@ async function emitPackPayload(
   writer: WritableStreamDefaultWriter<Uint8Array>,
   table: SelectionTable,
   sel: number,
-  state: PackReadState
+  state: PackReadState | undefined
 ): Promise<void> {
+  const syntheticPayload = table.syntheticPayloads[sel];
+  if (syntheticPayload) {
+    await writer.write(syntheticPayload);
+    controller.enqueue(syntheticPayload);
+    return;
+  }
+
+  if (!state) {
+    throw new Error(
+      `rewrite: missing read state for pack#${table.packSlots[sel]} entry#${table.entryIndices[sel]}`
+    );
+  }
+
   const payloadStart = table.offsets[sel] + table.headerLens[sel];
   let bytesLeft = table.payloadLens[sel];
   if (bytesLeft <= 0) return;
@@ -277,8 +290,9 @@ export function createRewriteStream(
           const sel = table.outputOrder[i];
           const packSlot = table.packSlots[sel];
           const readState = readStates.get(packSlot);
+          const syntheticPayload = table.syntheticPayloads[sel];
           const headerBytes = buildEntryHeaderBytes(table, sel);
-          if (!readState) {
+          if (!readState && !syntheticPayload) {
             const pack = snapshot.packs[packSlot];
             log.error("rewrite:missing-read-state", {
               sel,

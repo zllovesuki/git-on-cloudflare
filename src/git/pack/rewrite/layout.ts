@@ -9,7 +9,14 @@ export function canPassthroughSinglePack(
   snapshot: OrderedPackSnapshot,
   table: SelectionTable
 ): boolean {
-  return snapshot.packs.length === 1 && table.count === snapshot.packs[0]?.idx.count;
+  if (snapshot.packs.length !== 1 || table.count !== snapshot.packs[0]?.idx.count) {
+    return false;
+  }
+
+  for (let sel = 0; sel < table.count; sel++) {
+    if (table.syntheticPayloads[sel]) return false;
+  }
+  return true;
 }
 
 /**

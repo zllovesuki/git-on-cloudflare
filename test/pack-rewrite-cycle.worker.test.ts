@@ -180,6 +180,143 @@ describe("pack rewrite cycles", () => {
     expect(oidSet.size).toBe(verify.idxView.count);
   });
 
+  it("materializes a selected REF_DELTA row when a later base edge closes a cycle", async () => {
+    const seedPayload = new TextEncoder().encode("seed\n");
+    const bSuffix = new TextEncoder().encode("b\n");
+    const bPayload = new Uint8Array(seedPayload.length + bSuffix.length);
+    bPayload.set(seedPayload, 0);
+    bPayload.set(bSuffix, seedPayload.length);
+
+    const aSuffix = new TextEncoder().encode("a\n");
+    const aPayload = new Uint8Array(bPayload.length + aSuffix.length);
+    aPayload.set(bPayload, 0);
+    aPayload.set(aSuffix, bPayload.length);
+
+    const bOid = await computeOid("blob", bPayload);
+    const aOid = await computeOid("blob", aPayload);
+
+    const fallbackPackBytes = await buildPack([
+      { type: "blob", payload: seedPayload },
+      { type: "ofs-delta", baseIndex: 0, delta: buildAppendOnlyDelta(seedPayload, bSuffix) },
+    ]);
+    const sourceAPackBytes = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: bOid,
+        delta: buildAppendOnlyDelta(bPayload, aSuffix),
+      },
+    ]);
+    const sourceBPackBytes = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: aOid,
+        delta: buildCopyPrefixDelta(aPayload, bPayload.length),
+      },
+    ]);
+
+    const fallbackKey = `test/rewrite-latent-cycle-fallback-${Date.now()}.pack`;
+    const sourceAKey = `test/rewrite-latent-cycle-a-${Date.now()}.pack`;
+    const sourceBKey = `test/rewrite-latent-cycle-b-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(fallbackKey, fallbackPackBytes);
+    await env.REPO_BUCKET.put(sourceAKey, sourceAPackBytes);
+    await env.REPO_BUCKET.put(sourceBKey, sourceBPackBytes);
+
+    const fallbackResolve = await indexTestPack(env, fallbackKey, fallbackPackBytes.byteLength);
+    const fallbackRow: PackCatalogRow = {
+      packKey: fallbackKey,
+      kind: "compact",
+      state: "active",
+      tier: 1,
+      seqLo: 1,
+      seqHi: 1,
+      objectCount: fallbackResolve.objectCount,
+      packBytes: fallbackPackBytes.byteLength,
+      idxBytes: fallbackResolve.idxBytes,
+      createdAt: Date.now(),
+      supersededBy: null,
+    };
+    const sourceAResolve = await indexTestPack(env, sourceAKey, sourceAPackBytes.byteLength, [
+      fallbackRow,
+    ]);
+    const sourceARow: PackCatalogRow = {
+      packKey: sourceAKey,
+      kind: "receive",
+      state: "active",
+      tier: 0,
+      seqLo: 2,
+      seqHi: 2,
+      objectCount: sourceAResolve.objectCount,
+      packBytes: sourceAPackBytes.byteLength,
+      idxBytes: sourceAResolve.idxBytes,
+      createdAt: Date.now(),
+      supersededBy: null,
+    };
+    const sourceBResolve = await indexTestPack(env, sourceBKey, sourceBPackBytes.byteLength, [
+      sourceARow,
+      fallbackRow,
+    ]);
+
+    const snapshot = {
+      packs: [
+        {
+          packKey: sourceAKey,
+          packBytes: sourceAPackBytes.byteLength,
+          idx: sourceAResolve.idxView,
+        },
+        {
+          packKey: sourceBKey,
+          packBytes: sourceBPackBytes.byteLength,
+          idx: sourceBResolve.idxView,
+        },
+        {
+          packKey: fallbackKey,
+          packBytes: fallbackPackBytes.byteLength,
+          idx: fallbackResolve.idxView,
+        },
+      ],
+    };
+    const rewriteOptions = {
+      limiter: { run: async <T>(_label: string, fn: () => Promise<T>) => await fn() },
+      countSubrequest: () => {},
+    };
+
+    const selection = await buildSelection(
+      env,
+      snapshot,
+      [aOid, bOid],
+      createLogger("error", { service: "test" }),
+      new Set(),
+      rewriteOptions
+    );
+
+    expect(selection).toBeDefined();
+    const table = selection!.table;
+
+    let syntheticCount = 0;
+    for (let sel = 0; sel < table.count; sel++) {
+      if (table.syntheticPayloads[sel]) syntheticCount++;
+    }
+    expect(syntheticCount).toBe(1);
+    expect(buildOutputOrder(table, createLogger("error", { service: "test" }))).toBe(true);
+
+    const stream = await rewritePack(env, snapshot, [aOid, bOid], rewriteOptions);
+    expect(stream).toBeDefined();
+    const rewrittenPack = await readStreamBytes(stream!);
+
+    const verifyKey = `test/rewrite-latent-cycle-verify-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(verifyKey, rewrittenPack);
+    const verify = await indexTestPack(env, verifyKey, rewrittenPack.byteLength);
+
+    const oidSet = new Set<string>();
+    for (let i = 0; i < verify.idxView.count; i++) {
+      const oidBytes = verify.idxView.rawNames.subarray(i * 20, (i + 1) * 20);
+      oidSet.add(bytesToHex(oidBytes));
+    }
+    expect(oidSet.has(aOid)).toBe(true);
+    expect(oidSet.has(bOid)).toBe(true);
+    expect(oidSet.size).toBe(verify.idxView.count);
+  });
+
   it("does not create an artificial cycle when an older OFS base has a newer duplicate OID", async () => {
     const basePayload = new TextEncoder().encode("shared\n");
     const suffix = new TextEncoder().encode("extra\n");

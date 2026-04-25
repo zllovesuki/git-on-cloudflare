@@ -18,11 +18,22 @@ export const WHOLE_PACK_MAX_BYTES = 8 * 1024 * 1024;
 export const WHOLE_PACK_TOTAL_BUDGET = 32 * 1024 * 1024;
 export const HEADER_STABILITY_CAP = 16;
 
+export type RewriteFailure = {
+  reason: string;
+  retryable: boolean;
+  details?: Record<string, unknown>;
+};
+
+export type RewriteFailureRecorder = {
+  value?: RewriteFailure;
+};
+
 export type RewriteOptions = {
   signal?: AbortSignal;
   limiter?: Limiter;
   countSubrequest?: (n?: number) => boolean | void;
   onProgress?: (msg: string) => void;
+  failure?: RewriteFailureRecorder;
 };
 
 /**
@@ -56,6 +67,7 @@ export interface SelectionTable {
   baseOidRaw: Uint8Array | null; // lazy; capacity * 20, for REF_DELTA
   queuedForHeader: Uint8Array; // 1 = already queued for header read
   ofsPinned: Uint8Array; // 1 = exact pack position is required by an OFS_DELTA child
+  syntheticPayloads: Array<Uint8Array | undefined>; // compressed full-object payloads by sel
 
   /* output layout — set during convergence / topology sort */
   outputOffsets: Float64Array;
@@ -81,6 +93,7 @@ export function allocateSelectionTable(capacity: number): SelectionTable {
     baseOidRaw: null, // allocated lazily on first REF_DELTA
     queuedForHeader: new Uint8Array(capacity),
     ofsPinned: new Uint8Array(capacity),
+    syntheticPayloads: new Array<Uint8Array | undefined>(capacity),
     outputOffsets: new Float64Array(capacity),
     outputHeaderLens: new Uint16Array(capacity),
     outputOrder: new Uint32Array(capacity),
@@ -115,6 +128,7 @@ export function growSelectionTable(table: SelectionTable): void {
 
   table.queuedForHeader = grow(table.queuedForHeader, Uint8Array, next);
   table.ofsPinned = grow(table.ofsPinned, Uint8Array, next);
+  table.syntheticPayloads.length = next;
 
   // sizeVarBuf is capacity * 5
   const oldSvBuf = table.sizeVarBuf;
@@ -168,6 +182,7 @@ export function setSelectionEntryIdentity(
   }
   table.nextOffsets[sel] = nextOffset;
   table.oidsRaw.set(idx.rawNames.subarray(entryIndex * 20, entryIndex * 20 + 20), sel * 20);
+  table.syntheticPayloads[sel] = undefined;
 }
 
 /** Store the parsed pack header into the selection row. */
@@ -278,6 +293,7 @@ export function copySelectionRow(
   table.ofsPinned[targetSel] = options?.preserveTargetOfsPinned
     ? targetPinned
     : table.ofsPinned[sourceSel];
+  table.syntheticPayloads[targetSel] = table.syntheticPayloads[sourceSel];
 
   if (table.baseOidRaw) {
     table.baseOidRaw.set(
@@ -285,6 +301,14 @@ export function copySelectionRow(
       targetSel * 20
     );
   }
+}
+
+export function recordRewriteFailure(
+  options: RewriteOptions | undefined,
+  failure: RewriteFailure
+): void {
+  if (!options?.failure || options.failure.value) return;
+  options.failure.value = failure;
 }
 
 export type PackReadState = {

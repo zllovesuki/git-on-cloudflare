@@ -1,10 +1,16 @@
 import type { OrderedPackSnapshot } from "@/git/operations/fetch/types.ts";
-import type { IdxView } from "@/git/object-store/types.ts";
+import type { IdxView, PackedObjectResult } from "@/git/object-store/types.ts";
 import type { Logger } from "@/common/logger.ts";
 import type { PackHeaderEx } from "../packMeta.ts";
 
-import { hexToBytes } from "@/common/index.ts";
-import { findOffsetIndex, findOidRunInIdx } from "@/git/object-store/index.ts";
+import { bytesToHex, deflate, hexToBytes } from "@/common/index.ts";
+import { encodeObjHeader, objTypeCode } from "@/git/core/objects.ts";
+import {
+  collectPackedObjectCandidates,
+  findOffsetIndex,
+  findOidRunInIdx,
+} from "@/git/object-store/index.ts";
+import { materializePackedObjectCandidate } from "@/git/object-store/materialize.ts";
 import {
   claimCanonicalOwner,
   clonePackHeader,
@@ -16,6 +22,7 @@ import {
   ensurePackReadState,
   growSelectionTable,
   readSelectedHeader,
+  recordRewriteFailure,
   selectionDependsOn,
   selectionKey,
   setSelectionEntryIdentity,
@@ -24,6 +31,9 @@ import {
   type RewriteOptions,
   type SelectionTable,
 } from "./shared.ts";
+
+const SYNTHETIC_OBJECT_MAX_BYTES = 8 * 1024 * 1024;
+const SYNTHETIC_PAYLOAD_TOTAL_MAX_BYTES = 32 * 1024 * 1024;
 
 /**
  * Result of reading a single entry header and resolving its delta base.
@@ -167,7 +177,7 @@ export async function readHeaderAndResolveBase(
     canonicalized = ownership.canonicalized;
     // The current row stays live after reclaiming ownership, so its delta base
     // still needs to be resolved below before the row can be streamed.
-    return resolveDeltaBaseAndFinish(ownership.previousOwnerSel);
+    return await resolveDeltaBaseAndFinish(ownership.previousOwnerSel);
   }
   if (ownership.kind === "swapped") {
     log.debug("rewrite:delta-canonicalized-to-full", {
@@ -178,19 +188,21 @@ export async function readHeaderAndResolveBase(
   }
   canonicalized = ownership.canonicalized;
 
-  return resolveDeltaBaseAndFinish();
+  return await resolveDeltaBaseAndFinish();
 
-  function resolveDeltaBaseAndFinish(supersedeSel?: number): HeaderResolveResult {
+  async function resolveDeltaBaseAndFinish(supersedeSel?: number): Promise<HeaderResolveResult> {
     if (
-      !resolveDeltaBaseFromHeader(
+      !(await resolveDeltaBaseFromHeader(
         table,
         sel,
         snapshot,
         dedupMap,
         secondaryQueue,
+        env,
         log,
-        resolvedHeader
-      )
+        resolvedHeader,
+        options
+      ))
     ) {
       return { ok: false };
     }
@@ -203,15 +215,17 @@ export async function readHeaderAndResolveBase(
   }
 }
 
-export function resolveDeltaBaseFromHeader(
+export async function resolveDeltaBaseFromHeader(
   table: SelectionTable,
   sel: number,
   snapshot: OrderedPackSnapshot,
   dedupMap: Map<number, number>,
   secondaryQueue: number[],
+  env: Env,
   log: Logger,
-  header: PackHeaderEx
-): boolean {
+  header: PackHeaderEx,
+  options?: RewriteOptions
+): Promise<boolean> {
   const packSlot = table.packSlots[sel];
   const pack = snapshot.packs[packSlot];
   const offset = table.offsets[sel];
@@ -227,6 +241,11 @@ export function resolveDeltaBaseFromHeader(
     const baseIndex = findOffsetIndex(pack.idx, baseOffset);
     if (baseIndex === undefined) {
       log.warn("rewrite:missing-ofs-base", { packKey: pack.packKey, offset, baseOffset });
+      recordRewriteFailure(options, {
+        reason: "missing-ofs-base",
+        retryable: false,
+        details: { packKey: pack.packKey, offset, baseOffset },
+      });
       return false;
     }
 
@@ -245,6 +264,11 @@ export function resolveDeltaBaseFromHeader(
         offset,
         deltaType: "ofs",
         baseRel: header.baseRel,
+      });
+      recordRewriteFailure(options, {
+        reason: "self-referential-ofs-delta",
+        retryable: false,
+        details: { packKey: pack.packKey, offset, baseRel: header.baseRel },
       });
       return false;
     }
@@ -274,14 +298,25 @@ export function resolveDeltaBaseFromHeader(
       header.baseOid
     );
     if (choice.baseSel < 0) {
-      log.warn("rewrite:ref-base-cycle-unresolved", {
+      const reason = choice.candidateCount === 0 ? "missing-ref-base" : "ref-base-cycle-unresolved";
+      log.warn(`rewrite:${reason}`, {
         sel,
         packKey: pack.packKey,
         offset,
         baseOid: header.baseOid,
         candidateCount: choice.candidateCount,
       });
-      return false;
+      return await materializeSelectionAsFullObject({
+        table,
+        sel,
+        snapshot,
+        env,
+        log,
+        options,
+        reason,
+        baseOid: header.baseOid,
+        candidateCount: choice.candidateCount,
+      });
     }
 
     const baseSel = choice.baseSel;
@@ -294,7 +329,17 @@ export function resolveDeltaBaseFromHeader(
         deltaType: "ref",
         baseOid: header.baseOid,
       });
-      return false;
+      return await materializeSelectionAsFullObject({
+        table,
+        sel,
+        snapshot,
+        env,
+        log,
+        options,
+        reason: "self-referential-ref-delta",
+        baseOid: header.baseOid,
+        candidateCount: choice.candidateCount,
+      });
     }
 
     table.baseSlots[sel] = baseSel;
@@ -304,6 +349,198 @@ export function resolveDeltaBaseFromHeader(
     }
   }
 
+  return true;
+}
+
+type MaterializeSelectionArgs = {
+  table: SelectionTable;
+  sel: number;
+  snapshot: OrderedPackSnapshot;
+  env: Env;
+  log: Logger;
+  options?: RewriteOptions;
+  reason: string;
+  baseOid: string;
+  candidateCount: number;
+};
+
+type MaterializeOidArgs = {
+  snapshot: OrderedPackSnapshot;
+  env: Env;
+  log: Logger;
+  options?: RewriteOptions;
+  oid: string | Uint8Array;
+  visited: Set<string>;
+};
+
+function selectedOidHex(table: SelectionTable, sel: number): string {
+  return bytesToHex(table.oidsRaw.subarray(sel * 20, sel * 20 + 20));
+}
+
+function syntheticPayloadTotal(table: SelectionTable): number {
+  let total = 0;
+  for (let sel = 0; sel < table.syntheticPayloads.length; sel++) {
+    total += table.syntheticPayloads[sel]?.byteLength ?? 0;
+  }
+  return total;
+}
+
+async function materializeOidFromSnapshot(
+  args: MaterializeOidArgs
+): Promise<PackedObjectResult | undefined> {
+  const limiter = args.options?.limiter;
+  const countSubrequest = args.options?.countSubrequest;
+  if (!limiter || !countSubrequest) return undefined;
+
+  const candidates = collectPackedObjectCandidates(args.snapshot.packs, args.oid);
+  for (const candidate of candidates) {
+    if (args.options?.signal?.aborted) return undefined;
+
+    const object = await materializePackedObjectCandidate({
+      env: args.env,
+      candidate,
+      limiter,
+      countSubrequest,
+      log: args.log,
+      cyclePolicy: "miss",
+      resolveRefBase: async (baseOid, nextVisited) => {
+        return await materializeOidFromSnapshot({
+          ...args,
+          oid: baseOid,
+          visited: nextVisited,
+        });
+      },
+      visited: args.visited,
+      signal: args.options?.signal,
+    });
+    if (object) return object;
+  }
+
+  return undefined;
+}
+
+async function materializeSelectionAsFullObject(args: MaterializeSelectionArgs): Promise<boolean> {
+  const oid = selectedOidHex(args.table, args.sel);
+  const object = await materializeOidFromSnapshot({
+    snapshot: args.snapshot,
+    env: args.env,
+    log: args.log,
+    options: args.options,
+    oid,
+    visited: new Set<string>(),
+  });
+  if (!object) {
+    args.log.warn("rewrite:cycle-breaker-materialize-miss", {
+      sel: args.sel,
+      oid,
+      reason: args.reason,
+      baseOid: args.baseOid,
+      candidateCount: args.candidateCount,
+    });
+    recordRewriteFailure(args.options, {
+      reason: "cycle-breaker-materialize-miss",
+      retryable: false,
+      details: {
+        sel: args.sel,
+        oid,
+        baseOid: args.baseOid,
+        candidateCount: args.candidateCount,
+      },
+    });
+    return false;
+  }
+
+  if (object.oid !== oid) {
+    args.log.warn("rewrite:cycle-breaker-oid-mismatch", {
+      sel: args.sel,
+      oid,
+      materializedOid: object.oid,
+    });
+    recordRewriteFailure(args.options, {
+      reason: "cycle-breaker-oid-mismatch",
+      retryable: false,
+      details: { sel: args.sel, oid, materializedOid: object.oid },
+    });
+    return false;
+  }
+
+  if (object.payload.byteLength > SYNTHETIC_OBJECT_MAX_BYTES) {
+    args.log.warn("rewrite:cycle-breaker-object-too-large", {
+      sel: args.sel,
+      oid,
+      payloadBytes: object.payload.byteLength,
+      maxBytes: SYNTHETIC_OBJECT_MAX_BYTES,
+    });
+    recordRewriteFailure(args.options, {
+      reason: "synthetic-object-too-large",
+      retryable: false,
+      details: {
+        sel: args.sel,
+        oid,
+        payloadBytes: object.payload.byteLength,
+        maxBytes: SYNTHETIC_OBJECT_MAX_BYTES,
+      },
+    });
+    return false;
+  }
+
+  const compressedPayload = await deflate(object.payload);
+  const existingPayloadBytes = args.table.syntheticPayloads[args.sel]?.byteLength ?? 0;
+  const nextSyntheticTotal =
+    syntheticPayloadTotal(args.table) - existingPayloadBytes + compressedPayload.byteLength;
+  if (nextSyntheticTotal > SYNTHETIC_PAYLOAD_TOTAL_MAX_BYTES) {
+    args.log.warn("rewrite:cycle-breaker-total-too-large", {
+      sel: args.sel,
+      oid,
+      compressedBytes: compressedPayload.byteLength,
+      totalBytes: nextSyntheticTotal,
+      maxBytes: SYNTHETIC_PAYLOAD_TOTAL_MAX_BYTES,
+    });
+    recordRewriteFailure(args.options, {
+      reason: "synthetic-payload-budget-exceeded",
+      retryable: false,
+      details: {
+        sel: args.sel,
+        oid,
+        compressedBytes: compressedPayload.byteLength,
+        totalBytes: nextSyntheticTotal,
+        maxBytes: SYNTHETIC_PAYLOAD_TOTAL_MAX_BYTES,
+      },
+    });
+    return false;
+  }
+
+  const typeCode = objTypeCode(object.type);
+  const headerBytes = encodeObjHeader(typeCode, object.payload.byteLength);
+  if (headerBytes.byteLength > 5) {
+    recordRewriteFailure(args.options, {
+      reason: "synthetic-header-too-large",
+      retryable: false,
+      details: { sel: args.sel, oid, headerBytes: headerBytes.byteLength },
+    });
+    return false;
+  }
+
+  args.table.typeCodes[args.sel] = typeCode;
+  args.table.headerLens[args.sel] = headerBytes.byteLength;
+  args.table.payloadLens[args.sel] = compressedPayload.byteLength;
+  args.table.sizeVarBuf.set(headerBytes, args.sel * 5);
+  args.table.sizeVarLens[args.sel] = headerBytes.byteLength;
+  args.table.baseSlots[args.sel] = -1;
+  args.table.queuedForHeader[args.sel] = 0;
+  args.table.syntheticPayloads[args.sel] = compressedPayload;
+
+  args.log.info("rewrite:cycle-breaker-materialized", {
+    sel: args.sel,
+    oid,
+    type: object.type,
+    reason: args.reason,
+    baseOid: args.baseOid,
+    candidateCount: args.candidateCount,
+    payloadBytes: object.payload.byteLength,
+    compressedBytes: compressedPayload.byteLength,
+    syntheticTotalBytes: nextSyntheticTotal,
+  });
   return true;
 }
 

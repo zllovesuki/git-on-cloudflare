@@ -13,7 +13,7 @@ import {
   FetchPlanRetryError,
   loadUploadPackSnapshot,
 } from "../fetch/plan.ts";
-import { resolvePackStream } from "../fetch/execute.ts";
+import { resolvePackStreamResult } from "../fetch/execute.ts";
 import {
   SidebandProgressMux,
   emitProgress,
@@ -109,23 +109,26 @@ export async function handleFetchV2Streaming(
 
         const progressMux = new SidebandProgressMux();
         const limiter = getLimiter(plan.cacheCtx);
-        const packStream = await resolvePackStream(env, plan, {
+        const packResult = await resolvePackStreamResult(env, plan, {
           signal: plan.signal,
           limiter,
           countSubrequest: (n?: number) => countSubrequest(plan.cacheCtx, n),
           onProgress: (msg) => progressMux.push(msg),
         });
 
-        if (!packStream) {
+        if (packResult.status !== "ok") {
           streamLog.warn("stream:fetch:assemble-unavailable", {
             needed: plan.neededOids.length,
+            reason: packResult.failure.reason,
+            retryable: packResult.failure.retryable,
+            details: packResult.failure.details,
           });
-          emitFatal(controller, "Unable to assemble pack");
+          emitFatal(controller, `Unable to assemble pack: ${packResult.failure.reason}`);
           controller.close();
           return;
         }
 
-        await pipePackWithSideband(packStream, controller, {
+        await pipePackWithSideband(packResult.stream, controller, {
           signal: plan.signal,
           progressMux,
           log: streamLog,

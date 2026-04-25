@@ -88,5 +88,15 @@ export async function resolveRetainedRedirectBase(
   // newly discovered base rows still flow through the normal secondary queue so
   // they get the same header-read and duplicate-owner handling as the primary
   // selection pass.
-  return resolveDeltaBaseFromHeader(table, sel, snapshot, dedupMap, secondaryQueue, log, header);
+  return await resolveDeltaBaseFromHeader(
+    table,
+    sel,
+    snapshot,
+    dedupMap,
+    secondaryQueue,
+    env,
+    log,
+    header,
+    options
+  );
 }

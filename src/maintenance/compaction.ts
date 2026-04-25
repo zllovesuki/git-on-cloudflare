@@ -11,7 +11,7 @@ import {
   countSubrequest,
 } from "@/git/operations/limits.ts";
 import { scanPack, resolveDeltasAndWriteIdx } from "@/git/pack/indexer/index.ts";
-import { rewritePack } from "@/git/pack/rewrite.ts";
+import { rewritePackResult } from "@/git/pack/rewrite.ts";
 import { loadOrderedPackSnapshot } from "@/git/pack/snapshot.ts";
 import { deleteStagedPack, stagePackToR2, type StagedPackUpload } from "@/git/receive/r2Upload.ts";
 import { doPrefix, packIndexKey, packRefsKey, r2PackKey } from "@/keys.ts";
@@ -85,22 +85,54 @@ async function cleanupStagedCompaction(args: {
 async function abortCompactionLease(args: {
   stub: DurableObjectStub<RepoDurableObject>;
   leaseToken: string | undefined;
+  limiter: SubrequestLimiter;
+  cacheCtx: CacheContext;
   log: ReturnType<typeof createLogger>;
   reason: string;
 }) {
-  if (!args.leaseToken) return;
+  const leaseToken = args.leaseToken;
+  if (!leaseToken) return;
   try {
-    const cleared = await args.stub.abortCompaction(args.leaseToken);
+    countCompactionSubrequest(args.cacheCtx, args.log, "do:abort-compaction");
+    const cleared = await args.limiter.run("do:abort-compaction", async () => {
+      return await args.stub.abortCompaction(leaseToken);
+    });
     if (!cleared) {
       args.log.warn("compaction:abort-missed", {
         reason: args.reason,
         leaseToken: args.leaseToken,
       });
+      return;
     }
+    args.log.info("compaction:abort-complete", {
+      reason: args.reason,
+      leaseToken,
+    });
   } catch (error) {
     args.log.warn("compaction:abort-failed", {
       reason: args.reason,
       leaseToken: args.leaseToken,
+      error: String(error),
+    });
+  }
+}
+
+async function clearCompactionRequestAfterBlocked(args: {
+  stub: DurableObjectStub<RepoDurableObject>;
+  limiter: SubrequestLimiter;
+  cacheCtx: CacheContext;
+  log: ReturnType<typeof createLogger>;
+  reason: string;
+}): Promise<void> {
+  try {
+    countCompactionSubrequest(args.cacheCtx, args.log, "do:clear-compaction-request");
+    await args.limiter.run("do:clear-compaction-request", async () => {
+      await args.stub.clearCompactionRequest();
+    });
+    args.log.warn("compaction:blocked-cleared", { reason: args.reason });
+  } catch (error) {
+    args.log.warn("compaction:blocked-clear-failed", {
+      reason: args.reason,
       error: String(error),
     });
   }
@@ -133,7 +165,9 @@ export async function handleCompactionMessage(
 
   try {
     countCompactionSubrequest(cacheCtx, log, "do:begin-compaction");
-    const begin = await stub.beginCompaction();
+    const begin = await limiter.run("do:begin-compaction", async () => {
+      return await stub.beginCompaction();
+    });
     if (!begin.ok) {
       if (begin.status === "busy" && begin.reason === "receive-active") {
         log.info("compaction:busy-retry", { reason: begin.reason });
@@ -159,6 +193,8 @@ export async function handleCompactionMessage(
       await abortCompactionLease({
         stub,
         leaseToken,
+        limiter,
+        cacheCtx,
         log,
         reason: snapshotLoad.reason,
       });
@@ -179,6 +215,8 @@ export async function handleCompactionMessage(
       await abortCompactionLease({
         stub,
         leaseToken,
+        limiter,
+        cacheCtx,
         log,
         reason: "source-pack-missing",
       });
@@ -206,19 +244,53 @@ export async function handleCompactionMessage(
       packs: [...sourcePacks, ...fallbackPacks],
     };
 
-    const packStream = await rewritePack(env, compactionSnapshot, neededOids, {
+    const rewriteResult = await rewritePackResult(env, compactionSnapshot, neededOids, {
       limiter,
       countSubrequest: (n) => countCompactionSubrequest(cacheCtx, log, "r2:rewrite-pack", n),
     });
-    if (!packStream) {
-      throw new Error("Compaction rewrite did not produce an output stream.");
+    if (rewriteResult.status !== "ok") {
+      log.warn("compaction:rewrite-unavailable", {
+        reason: rewriteResult.failure.reason,
+        retryable: rewriteResult.failure.retryable,
+        details: rewriteResult.failure.details,
+      });
+      await abortCompactionLease({
+        stub,
+        leaseToken,
+        limiter,
+        cacheCtx,
+        log,
+        reason: rewriteResult.failure.reason,
+      });
+
+      if (rewriteResult.failure.retryable) {
+        queueRetry(message, COMPACTION_RETRY_DELAY_SECONDS);
+        return;
+      }
+
+      leaseToken = undefined;
+      await clearCompactionRequestAfterBlocked({
+        stub,
+        limiter,
+        cacheCtx,
+        log,
+        reason: rewriteResult.failure.reason,
+      });
+      log.error("compaction:blocked", {
+        reason: rewriteResult.failure.reason,
+        sourceCount: begin.sourcePacks.length,
+        sourceSeqLo: begin.sourcePacks[0]?.seqLo,
+        sourceSeqHi: begin.sourcePacks[begin.sourcePacks.length - 1]?.seqHi,
+      });
+      message.ack();
+      return;
     }
 
     const packKey = r2PackKey(doPrefix(body.doId), `pack-cmp-${begin.lease.token}.pack`);
     stagedUpload = await stagePackToR2({
       env,
       request: new Request(`https://queue.internal/${encodeURIComponent(repoLabel)}/compact-pack`),
-      packStream,
+      packStream: rewriteResult.stream,
       packKey,
       bytesConsumed: 0,
       limiter,
@@ -247,17 +319,20 @@ export async function handleCompactionMessage(
     });
 
     countCompactionSubrequest(cacheCtx, log, "do:commit-compaction");
-    const commit = await stub.commitCompaction({
-      token: begin.lease.token,
-      sourcePacks: begin.sourcePacks,
-      targetTier: begin.targetTier,
-      packsetVersion: begin.packsetVersion,
-      stagedPack: {
-        packKey: stagedUpload.packKey,
-        packBytes: stagedUpload.packBytes,
-        idxBytes: resolveResult.idxBytes,
-        objectCount: resolveResult.objectCount,
-      },
+    const committedUpload = stagedUpload;
+    const commit = await limiter.run("do:commit-compaction", async () => {
+      return await stub.commitCompaction({
+        token: begin.lease.token,
+        sourcePacks: begin.sourcePacks,
+        targetTier: begin.targetTier,
+        packsetVersion: begin.packsetVersion,
+        stagedPack: {
+          packKey: committedUpload.packKey,
+          packBytes: committedUpload.packBytes,
+          idxBytes: resolveResult.idxBytes,
+          objectCount: resolveResult.objectCount,
+        },
+      });
     });
 
     if (commit.status === "retry") {
@@ -317,6 +392,8 @@ export async function handleCompactionMessage(
     await abortCompactionLease({
       stub,
       leaseToken,
+      limiter,
+      cacheCtx,
       log,
       reason: "error",
     });
