@@ -11,6 +11,10 @@
     {
       "pattern": "git-on-cloudflare.com",
       "custom_domain": true
+    },
+    {
+      "pattern": "git.edgenative.dev",
+      "custom_domain": true
     }
   ],
   "limits": {
