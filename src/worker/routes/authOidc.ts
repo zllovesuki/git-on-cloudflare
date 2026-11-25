@@ -1,9 +1,9 @@
-import { validateSlugForRoute } from "@/shared/slugs";
 import {
   claimNamespace,
   findUserByTesseraSub,
   insertMembershipIfMissing,
   insertUserIfNew,
+  listNamespacesForUser,
 } from "@/worker/db/d1/dal";
 import {
   clearOidcTransactionCookie,
@@ -24,6 +24,7 @@ import {
   loadOidcConfig,
   verifyIdTokenClaims,
 } from "@/worker/auth/oidc";
+import { namespaceClaimCandidates } from "@/worker/auth/namespaceClaim";
 import { sameOriginViolation } from "@/worker/auth/origin";
 import {
   createSessionForUser,
@@ -183,10 +184,14 @@ export function registerAuthOidcRoutes(router: AppRouter) {
       return errorRedirect(c, "session_create_failed");
     }
 
-    // First-login race-safe write model:
+    // Race-safe write model:
     //   1. Insert user; ON CONFLICT means existing row.
-    //   2. If new + valid pref-name, attempt namespace claim; can lose race.
-    //   3. If claim won, create membership.
+    //   2. If the account has no namespace yet, try the claim candidates.
+    //      This also retries on later sign-ins, so an account that previously
+    //      signed in without a `preferred_username` (for example Google OIDC)
+    //      recovers without manual D1 edits once the provider supplies an
+    //      email or username.
+    //   3. If a claim won, create membership.
     //   4. Always create a sealed local session cookie.
     //
     // These writes stay sequential because each branch depends on prior
@@ -201,10 +206,8 @@ export function registerAuthOidcRoutes(router: AppRouter) {
       createdAt: now,
     });
     let userId: string;
-    let wasNewUser = false;
     if (inserted) {
       userId = inserted.id;
-      wasNewUser = true;
     } else {
       const existing = await findUserByTesseraSub(db, verified.verified.sub);
       if (!existing) {
@@ -215,31 +218,40 @@ export function registerAuthOidcRoutes(router: AppRouter) {
       userId = existing.id;
     }
 
+    const existingNamespaces = await listNamespacesForUser(db, userId);
+    const claimCandidates =
+      existingNamespaces.length === 0 ? namespaceClaimCandidates(verified.verified) : [];
     let claimedNamespaceSlug: string | null = null;
-    if (wasNewUser && verified.verified.preferredUsername) {
-      const candidate = validateSlugForRoute(verified.verified.preferredUsername.toLowerCase());
-      if (candidate.ok) {
-        const claimed = await claimNamespace(db, {
-          id: generateNamespaceId(),
-          slug: candidate.slug,
-          createdBy: userId,
-          createdAt: now,
-        });
-        if (claimed) {
-          await insertMembershipIfMissing(db, {
-            namespaceId: claimed.id,
-            userId,
-            createdAt: now,
-          });
-          claimedNamespaceSlug = claimed.slug;
-        } else {
-          log.info("oidc:callback-namespace-taken", { slug: candidate.slug });
-        }
+    for (const slug of claimCandidates) {
+      const claimed = await claimNamespace(db, {
+        id: generateNamespaceId(),
+        slug,
+        createdBy: userId,
+        createdAt: now,
+      });
+      if (!claimed) {
+        log.info("oidc:callback-namespace-taken", { slug });
+        continue;
       }
+      await insertMembershipIfMissing(db, {
+        namespaceId: claimed.id,
+        userId,
+        createdAt: now,
+      });
+      claimedNamespaceSlug = claimed.slug;
+      break;
     }
 
     try {
-      await createSessionForUser(c.env, c, userId, now);
+      // Keep the first candidate in the sealed session so the account page
+      // can prefill a self-service claim form when every candidate was taken.
+      await createSessionForUser(
+        c.env,
+        c,
+        userId,
+        now,
+        claimedNamespaceSlug ? undefined : claimCandidates[0]
+      );
     } catch (error) {
       log.error("oidc:callback-session-create-failed", { error: String(error) });
       clearOidcTransactionCookie(c);

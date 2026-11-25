@@ -49,6 +49,13 @@ export const RepositoryVisibilityRequestSchema = z.preprocess(
   })
 );
 
+export const NamespaceClaimRequestSchema = z.preprocess(
+  objectOrEmpty,
+  z.object({
+    slug: LowercaseSlugInputSchema,
+  })
+);
+
 const PatGrantLevelSchema = z.enum(["pull", "push"]);
 
 const NullablePatGrantLevelSchema = z.preprocess(

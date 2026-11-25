@@ -38,6 +38,7 @@ export function registerAuthTokenRoutes(router: AppRouter) {
       {
         userId: viewer.userId,
         primaryNamespaceSlug: viewer.primaryNamespaceSlug,
+        suggestedNamespaceSlug: viewer.suggestedNamespaceSlug,
         namespaces: namespaces.map((ns) => ({ id: ns.id, slug: ns.slug })),
         repositories: repositoryRows.map((row) => ({
           id: row.repository.id,

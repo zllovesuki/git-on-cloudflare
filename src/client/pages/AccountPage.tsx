@@ -1,7 +1,5 @@
-import { ShieldCheck } from "lucide-react";
-
-import { EmptyState } from "@/client/components/ui";
 import { IslandHost } from "@/client/server/IslandHost";
+import { ClaimNamespaceIsland } from "@/client/islands/claimNamespace";
 import { RepositoriesIsland } from "@/client/islands/repositories";
 import { TokensIsland, type TokensIslandSummary } from "@/client/islands/tokens";
 
@@ -21,6 +19,7 @@ export type AccountRepository = {
 export type AccountPageProps = {
   userId: string;
   primaryNamespaceSlug?: string;
+  suggestedNamespaceSlug?: string;
   namespaces: AccountNamespace[];
   repositories: AccountRepository[];
   tokens: TokensIslandSummary[];
@@ -34,6 +33,7 @@ function truncateUserId(userId: string): string {
 export function AccountPage({
   userId,
   primaryNamespaceSlug,
+  suggestedNamespaceSlug,
   namespaces,
   repositories,
   tokens,
@@ -63,11 +63,9 @@ export function AccountPage({
           Namespaces
         </h2>
         {namespaces.length === 0 ? (
-          <EmptyState
-            icon={<ShieldCheck className="h-5 w-5 text-zinc-400" aria-hidden="true" />}
-            title="No namespace yet"
-            detail="Sign in once with a unique tessera username to claim a namespace."
-          />
+          <IslandHost name="claim-namespace" props={{ suggestedNamespaceSlug }}>
+            <ClaimNamespaceIsland suggestedNamespaceSlug={suggestedNamespaceSlug} />
+          </IslandHost>
         ) : (
           <div className="flex flex-wrap gap-2">
             {namespaces.map((ns) => (

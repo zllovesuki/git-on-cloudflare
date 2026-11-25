@@ -152,9 +152,11 @@ Phase 1 adds OIDC sign-in, D1 ownership tables, local sealed browser sessions, P
 
 If automatic namespace claim does not happen:
 
-- Confirm your provider emits `preferred_username`.
-- Confirm the value passes `src/shared/slugs.ts` policy and is not reserved (`auth`, `api`, `_cache`, and similar route-owned names are rejected).
-- If your provider cannot emit `preferred_username`, manually seed D1 `users`, `namespaces`, `namespace_memberships`, and `repositories` rows, then write `ROUTES` entries for public repos or proceed to phase 2 and rely on authenticated D1 fallback.
+- Check the `oidc:callback-success` log entry: `claimedNamespaceSlug` is non-null when a claim succeeded.
+- Confirm your provider emits `preferred_username` or `email`. Providers such as Google omit `preferred_username`, so the email local-part is used as a fallback candidate.
+- Confirm the value normalizes to a claimable slug under `src/shared/slugs.ts`; reserved names (`auth`, `api`, `_cache`, ...) are skipped and numeric suffixes are tried for collisions.
+- If the account already exists without a namespace, sign in again. The claim is retried whenever the account has no namespace, not only on first user insert.
+- If every candidate is taken, open `/auth/account` and use the claim form. Manual D1 seeding is no longer required.
 
 If backfill stalls:
 

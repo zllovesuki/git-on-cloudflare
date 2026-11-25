@@ -306,6 +306,10 @@ export async function exchangeAuthorizationCode(
 export interface VerifiedIdToken {
   sub: string;
   preferredUsername?: string;
+  // Providers such as Google never emit `preferred_username`. Their ID
+  // tokens do carry a verified `email`, which is used only as a namespace
+  // claim candidate (never as identity proof) when no username is present.
+  email?: string;
 }
 
 export type VerifyError = "missing_sub";
@@ -324,7 +328,8 @@ export function verifyIdTokenClaims(claims: oidc.IDToken): VerifyResult {
   }
   const preferredUsername =
     typeof claims.preferred_username === "string" ? claims.preferred_username : undefined;
-  return { ok: true, verified: { sub: claims.sub, preferredUsername } };
+  const email = typeof claims.email === "string" ? claims.email : undefined;
+  return { ok: true, verified: { sub: claims.sub, preferredUsername, email } };
 }
 
 export function buildAuthorizeUrl(
